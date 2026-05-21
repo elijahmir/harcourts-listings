@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the Harcourts mobile uploader.
+
+  Install:
+    1) Edit the absolute paths below (PROJECT_ROOT / Python path) so they match
+       this install. Two greps are enough:
+         grep PROJECT_ROOT com.harcourts.uploader.plist
+         grep python3      com.harcourts.uploader.plist
+    2) cp com.harcourts.uploader.plist ~/Library/LaunchAgents/
+    3) launchctl load ~/Library/LaunchAgents/com.harcourts.uploader.plist
+    4) Visit http://localhost:8080/healthz to confirm it is alive.
+
+  Unload:
+    launchctl unload ~/Library/LaunchAgents/com.harcourts.uploader.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.harcourts.uploader</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>/ABSOLUTE/PATH/TO/harcourts-listings/services/uploader/server.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HARCOURTS_PROJECT_ROOT</key>
+    <string>/ABSOLUTE/PATH/TO/harcourts-listings</string>
+    <key>HARCOURTS_UPLOADER_HOST</key>
+    <string>0.0.0.0</string>
+    <key>HARCOURTS_UPLOADER_PORT</key>
+    <string>8080</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/harcourts-listings/services/uploader/uploader.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/harcourts-listings/services/uploader/uploader.log</string>
+</dict>
+</plist>

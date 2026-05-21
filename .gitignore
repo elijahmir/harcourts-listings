@@ -5,3 +5,8 @@ consultants/*/sessions/*
 *.log
 node_modules/
 .env
+
+# Python virtualenvs (e.g. services/uploader/.venv)
+.venv/
+__pycache__/
+*.pyc

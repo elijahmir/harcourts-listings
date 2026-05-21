@@ -8,9 +8,23 @@ Ask: "What is the full property address?" Wait for the answer.
 
 Create a session folder at consultants/{slug}/sessions/{YYYY-MM-DD}_{address-slug}/.
 
-Ask: "Now please share the property photos and floor plan. You can drop the files into the session folder I just created, or paste image links. Let me know when they are ready." Confirm receipt of all materials before proceeding.
+Then offer the user the upload link. Construct it from environment variables that the launcher exports:
 
-(If VaultRE integration becomes available — see ROADMAP.md — offer the user a choice between automatic pull from VaultRE and manual upload. For now, manual only.)
+    {HARCOURTS_UPLOADER_BASE_URL}/u/{HARCOURTS_CONSULTANT_SLUG}/{session-folder-name}
+
+Tell the user, in plain language, something like:
+
+> "Session folder is ready. Open this on your phone or laptop to drop in the photos and floor plan:
+>
+> &nbsp;&nbsp;&nbsp;&nbsp;{the full URL}
+>
+> Pick as many photos as you like in one go. The page will say 'Done' when it has them. Tell me here once you're back."
+
+Confirm receipt of all materials before proceeding by listing back what landed in the session folder (file count and whether a floor plan is present).
+
+If the upload page is unreachable, or the user prefers, accept the original fallback: they can drop files directly into the session folder on the Mac, or paste image links.
+
+(If VaultRE integration becomes available — see ROADMAP.md — offer the user a third path: automatic pull from VaultRE. For now the manual upload and the web uploader are the two routes.)
 
 ## Phase 2 — Analyse and brief
 

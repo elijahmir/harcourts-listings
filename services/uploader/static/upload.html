@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0d3b2e" />
+  <title>Upload to Harcourts</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="masthead">
+      <h1>Upload photos</h1>
+      <p class="subtitle" id="session-label">Loading…</p>
+    </header>
+
+    <section class="card">
+      <label class="dropzone" id="dropzone" for="files">
+        <span class="dropzone-headline">Tap to choose photos</span>
+        <span class="dropzone-detail">JPEG, PNG, HEIC, or PDF for floor plans. You can pick many at once.</span>
+        <input id="files" type="file" multiple accept="image/*,application/pdf" hidden />
+      </label>
+      <ul class="filelist" id="filelist"></ul>
+      <button class="primary" id="upload" disabled>Upload</button>
+      <div class="progress" id="progress" hidden>
+        <div class="bar" id="bar"></div>
+      </div>
+      <p class="status" id="status"></p>
+    </section>
+
+    <p class="hint">
+      When the upload says <strong>Done</strong>, switch back to the
+      <strong>Harcourts Listings</strong> chat and tell the assistant the photos are ready.
+    </p>
+  </main>
+
+  <script>
+    const parts = window.location.pathname.split('/');
+    const slug = decodeURIComponent(parts[2]);
+    const session = decodeURIComponent(parts[3]);
+    document.getElementById('session-label').textContent = `For ${slug} · ${session}`;
+
+    const filesInput = document.getElementById('files');
+    const filelist = document.getElementById('filelist');
+    const uploadBtn = document.getElementById('upload');
+    const statusEl = document.getElementById('status');
+    const progress = document.getElementById('progress');
+    const bar = document.getElementById('bar');
+
+    let pickedFiles = [];
+
+    function renderList() {
+      filelist.innerHTML = pickedFiles.map(f => {
+        const kb = (f.size / 1024).toFixed(0);
+        return `<li><span class="name">${f.name}</span><span class="size">${kb} KB</span></li>`;
+      }).join('');
+      uploadBtn.disabled = pickedFiles.length === 0;
+    }
+
+    filesInput.addEventListener('change', (e) => {
+      pickedFiles = Array.from(e.target.files || []);
+      renderList();
+    });
+
+    uploadBtn.addEventListener('click', () => {
+      if (!pickedFiles.length) return;
+      const formData = new FormData();
+      for (const f of pickedFiles) formData.append('files', f, f.name);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', window.location.pathname);
+      uploadBtn.disabled = true;
+      progress.hidden = false;
+      statusEl.textContent = 'Uploading…';
+
+      xhr.upload.addEventListener('progress', (evt) => {
+        if (evt.lengthComputable) {
+          const pct = Math.round((evt.loaded / evt.total) * 100);
+          bar.style.width = pct + '%';
+          statusEl.textContent = `Uploading… ${pct}%`;
+        }
+      });
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const data = JSON.parse(xhr.responseText);
+          statusEl.textContent = `Done. Uploaded ${data.count} file${data.count === 1 ? '' : 's'}.`;
+          bar.style.width = '100%';
+          pickedFiles = [];
+          filesInput.value = '';
+          renderList();
+        } else {
+          let msg = `Upload failed (HTTP ${xhr.status})`;
+          try { msg += ': ' + (JSON.parse(xhr.responseText).detail || ''); } catch (_) {}
+          statusEl.textContent = msg;
+          uploadBtn.disabled = false;
+        }
+      };
+      xhr.onerror = () => {
+        statusEl.textContent = 'Upload failed: network error. Check Tailscale.';
+        uploadBtn.disabled = false;
+      };
+      xhr.send(formData);
+    });
+  </script>
+</body>
+</html>

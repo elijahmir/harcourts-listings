@@ -144,6 +144,18 @@ export HARCOURTS_USER_EMAIL="$EMAIL"
 export HARCOURTS_CONSULTANT_SLUG="$SELECTED_SLUG"
 export HARCOURTS_CONSULTANT_NAME="$SELECTED_NAME"
 
+# Load .env (if present) so HARCOURTS_UPLOADER_BASE_URL and any other shared
+# config make it into the Claude session. .env is gitignored.
+if [[ -f "$PROJECT_ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$PROJECT_ROOT/.env"
+  set +a
+fi
+
+# Fall back to localhost if the operator hasn't set a Tailnet-reachable URL yet.
+export HARCOURTS_UPLOADER_BASE_URL="${HARCOURTS_UPLOADER_BASE_URL:-http://localhost:8080}"
+
 cd "$TARGET_DIR"
 
 if ! command -v claude >/dev/null 2>&1; then
