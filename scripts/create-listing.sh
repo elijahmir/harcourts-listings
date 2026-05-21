@@ -163,4 +163,12 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 1
 fi
 
-exec claude
+# Use 'acceptEdits' permission mode so claude auto-approves file edits that
+# the workflow requires (creating session folders, writing session.json, etc.)
+# without nagging the staff member. This still prompts on Bash and other
+# escalations, which is the right safety baseline for an unattended chat.
+#
+# The workspace trust dialog ("Do you trust this folder?") shown on first
+# run in a new directory is handled separately — see docs/HOST-SETUP.md for
+# the one-time admin step that pre-trusts each consultant folder.
+exec claude --permission-mode acceptEdits
