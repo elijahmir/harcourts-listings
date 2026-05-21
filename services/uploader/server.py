@@ -21,6 +21,7 @@ Environment:
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -30,6 +31,8 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+log = logging.getLogger("uploader")
+
 HERE = Path(__file__).resolve().parent
 DEFAULT_ROOT = HERE.parent.parent
 PROJECT_ROOT = Path(os.environ.get("HARCOURTS_PROJECT_ROOT", str(DEFAULT_ROOT))).resolve()
@@ -37,12 +40,45 @@ CONSULTANTS_DIR = PROJECT_ROOT / "consultants"
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 MAX_NAME_LEN = 120
+HEIC_SUFFIXES = {".heic", ".heif"}
+
+# Try to enable HEIC support. If pillow-heif isn't installed, HEIC files are
+# still accepted and stored verbatim — they just won't be readable by Claude's
+# vision input until the operator runs `pip install -r requirements.txt` again.
+try:
+    from PIL import Image
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+    HEIC_CONVERSION_AVAILABLE = True
+except Exception as exc:  # noqa: BLE001 — best-effort optional dependency
+    HEIC_CONVERSION_AVAILABLE = False
+    log.warning("HEIC conversion disabled: %s", exc)
 
 
 def safe_filename(name: str) -> str:
     base = Path(name).name
     cleaned = SAFE_NAME.sub("_", base).strip("._-") or "upload"
     return cleaned[:MAX_NAME_LEN]
+
+
+def maybe_convert_heic(path: Path) -> Path:
+    """If `path` is a HEIC/HEIF file and conversion is available, replace it
+    with a JPEG sibling and return the new path. Otherwise return `path`
+    unchanged. Conversion failures leave the original in place."""
+    if path.suffix.lower() not in HEIC_SUFFIXES:
+        return path
+    if not HEIC_CONVERSION_AVAILABLE:
+        return path
+    try:
+        with Image.open(path) as img:
+            new_path = path.with_suffix(".jpg")
+            img.convert("RGB").save(new_path, "JPEG", quality=88, optimize=True)
+        path.unlink(missing_ok=True)
+        return new_path
+    except Exception as exc:  # noqa: BLE001 — keep original on any failure
+        log.warning("HEIC conversion failed for %s: %s", path.name, exc)
+        return path
 
 
 def list_consultant_slugs() -> list[str]:
@@ -82,6 +118,7 @@ def healthz() -> dict:
         "ok": True,
         "project_root": str(PROJECT_ROOT),
         "consultants": list_consultant_slugs(),
+        "heic_conversion": HEIC_CONVERSION_AVAILABLE,
     }
 
 
@@ -140,11 +177,15 @@ async def upload(slug: str, session: str, files: list[UploadFile]) -> JSONRespon
                 out.write(chunk)
                 size += len(chunk)
         await upload_file.close()
+
+        final_path = maybe_convert_heic(destination)
+        converted = final_path != destination
         saved.append(
             {
-                "saved_as": destination.name,
-                "bytes": size,
-                "relative_path": str(destination.relative_to(PROJECT_ROOT)),
+                "saved_as": final_path.name,
+                "bytes": final_path.stat().st_size if converted else size,
+                "relative_path": str(final_path.relative_to(PROJECT_ROOT)),
+                "converted_from_heic": converted,
             }
         )
 

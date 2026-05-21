@@ -1,3 +1,9 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
 python-multipart>=0.0.9
+
+# Image conversion. Pillow handles JPEG/PNG/WebP natively; pillow-heif adds
+# HEIC/HEIF support so iPhone photos can be converted to a format Claude's
+# vision input accepts. Both should install cleanly on macOS via pip.
+Pillow>=10.0
+pillow-heif>=0.16

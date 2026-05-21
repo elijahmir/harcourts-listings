@@ -6,11 +6,12 @@ A shared system on one MacBook that helps the consultants at Harcourts Ulverston
 
 ## For staff: how to start a listing
 
-1. Open Terminal and run `./scripts/create-listing.sh` from the project folder.
-2. Pick a consultant (number or name), then enter your email so the session is tagged.
-3. Answer the questions in the chat. When the system asks you to drop photos and a floor plan into the session folder, just drag them in.
+There are two ways in:
 
-The system will walk you through five phases: collect inputs, sales agent briefing, listing description, ancillary content, then the final Word document. After each phase it pauses and asks you to approve before continuing.
+- **From your phone or laptop (recommended).** See [docs/MOBILE-SETUP.md](docs/MOBILE-SETUP.md) — about ten minutes of one-time setup per device, then two icons on your home screen do the rest.
+- **Directly on the office Mac.** Open Terminal, run `./scripts/create-listing.sh`, pick a consultant, enter your email, answer the questions in the chat.
+
+Either way, the system walks you through five phases: collect inputs, sales agent briefing, listing description, ancillary content, then the final Word document. After each phase it pauses and asks you to approve before continuing.
 
 If a consultant's profile has not been set up yet, the system will say so and offer to interview you. Plan for fifteen to twenty minutes the first time you use a new consultant.
 

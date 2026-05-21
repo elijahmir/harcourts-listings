@@ -4,27 +4,91 @@ Run these phases in order. Do not skip ahead. After each phase, present the resu
 
 ## Phase 1 — Collect inputs
 
+This phase has three parts: capture the address, create the session, and get the property's photos and floor plan onto the Mac so you can analyse them. Run the steps in order. Do not move on to Phase 2 until you have visually verified files exist on disk.
+
+### Step 1.1 — Confirm the address
+
 Ask: "What is the full property address?" Wait for the answer.
 
-Create a session folder at consultants/{slug}/sessions/{YYYY-MM-DD}_{address-slug}/.
+When the user replies, repeat the address back in one short sentence so they can catch a typo before you create a folder named after it. Example: "Got it — 22 Dial Road, Penguin TAS 7316. Correct?"
 
-Then offer the user the upload link. Construct it from environment variables that the launcher exports:
+### Step 1.2 — Create the session folder
+
+The launcher (`scripts/create-listing.sh`) exports these environment variables. Read them via `Bash` (e.g. `echo $HARCOURTS_CONSULTANT_SLUG`):
+
+| Variable                       | Used for                                                  |
+| ------------------------------ | --------------------------------------------------------- |
+| `HARCOURTS_CONSULTANT_SLUG`    | The slug of the active consultant (e.g. `wendy-squibb`).  |
+| `HARCOURTS_CONSULTANT_NAME`    | Full name for messages and metadata.                       |
+| `HARCOURTS_USER_EMAIL`         | The staff member's email captured at session start.        |
+| `HARCOURTS_UPLOADER_BASE_URL`  | Base URL of the mobile uploader.                          |
+
+If any required variable is empty (the user ran `claude` directly instead of the launcher), ask the user for the missing value before continuing.
+
+Make a session folder at:
+
+    consultants/{HARCOURTS_CONSULTANT_SLUG}/sessions/{YYYY-MM-DD}_{address-slug}/
+
+…where `{address-slug}` is a short kebab-case form of the street address — lowercase, ASCII letters and digits only, hyphens between words, no street type if it makes the slug too long. Example: `22-dial-road-penguin`. Also create an empty `photos/` subfolder inside it.
+
+Drop a small `session.json` at the root of the session folder so the rest of the system has the context:
+
+```json
+{
+  "consultant_slug": "...",
+  "consultant_name": "...",
+  "user_email": "...",
+  "address": "<the confirmed address>",
+  "started_at": "<ISO-8601 UTC, e.g. 2026-05-21T14:33:00Z>"
+}
+```
+
+### Step 1.3 — Hand the user the upload link
+
+Construct the link by concatenating the base URL, the slug, and the session folder name:
 
     {HARCOURTS_UPLOADER_BASE_URL}/u/{HARCOURTS_CONSULTANT_SLUG}/{session-folder-name}
 
-Tell the user, in plain language, something like:
+Send the URL in plain language. Calibrate the tone to the consultant's voice, but the substance is:
 
-> "Session folder is ready. Open this on your phone or laptop to drop in the photos and floor plan:
+> "Session is ready. Open this on your phone, laptop, or desktop to drop in the photos and the floor plan:
 >
-> &nbsp;&nbsp;&nbsp;&nbsp;{the full URL}
+>     {the full URL}
 >
-> Pick as many photos as you like in one go. The page will say 'Done' when it has them. Tell me here once you're back."
+> Photos and floor plan together is fine — pick everything in one go. The page will say 'Done' when it has them. Let me know here once you're back."
 
-Confirm receipt of all materials before proceeding by listing back what landed in the session folder (file count and whether a floor plan is present).
+Then wait for the user to come back.
 
-If the upload page is unreachable, or the user prefers, accept the original fallback: they can drop files directly into the session folder on the Mac, or paste image links.
+### Step 1.4 — Verify the files actually arrived
 
-(If VaultRE integration becomes available — see ROADMAP.md — offer the user a third path: automatic pull from VaultRE. For now the manual upload and the web uploader are the two routes.)
+When the user says they're done, do NOT trust their word alone. Look on disk yourself with `Bash` (`ls -la consultants/{slug}/sessions/{session}/photos/`). For each file:
+
+- Anything ending `.jpg`, `.jpeg`, `.png`, `.webp` → property photo.
+- Anything ending `.pdf` → likely floor plan or contract attachment.
+- Any filename containing `floor`, `plan`, `fp`, or with unusual aspect ratio → likely the floor plan.
+- HEIC files should not appear — the uploader converts them to JPEG automatically. If you see one, the conversion fell through (libheif missing); flag this to the operator after the session.
+
+Report back to the user. Examples:
+
+> "Got it. I see **8 photos** and **1 floor plan** in your session folder. Ready to brief?"
+>
+> "I see **6 photos** but no floor plan yet — was that intentional, or should I wait?"
+>
+> "The folder still looks empty. Open the link again and make sure the page shows 'Done' before switching back."
+
+### Step 1.5 — Fallbacks if the upload page is unreachable
+
+If `HARCOURTS_UPLOADER_BASE_URL` is empty, or the user reports the page won't load, give them the manual paths in this order:
+
+1. **AirDrop (iPhone, in the office).** "AirDrop the photos to the Mac. They'll land in your Downloads folder; tell me when they're there and I'll move them into the session." Then move them with `mv ~/Downloads/IMG_*.jpg consultants/{slug}/sessions/{session}/photos/`.
+2. **Drag into the session folder.** "Open the session folder on the Mac at this path: `consultants/{slug}/sessions/{session}/photos/`. Drop the files in." Then list the folder to confirm.
+3. **Paste image URLs.** Accept publicly accessible image URLs and download them with `curl -L -o` into the photos folder.
+
+After fallback, run Step 1.4 to verify on disk before continuing.
+
+### Step 1.6 — Future: VaultRE pull
+
+When the VaultRE integration is wired in (see ROADMAP.md and integrations/vaultre/ANALYSIS.md), offer a fourth path: "I can pull the photos straight from VaultRE — what's the property's reference ID or address?" For now the uploader and the manual paths are the only routes.
 
 ## Phase 2 — Analyse and brief
 
