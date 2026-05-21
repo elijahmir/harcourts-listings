@@ -15,8 +15,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# Resolve to the REAL path (-P), not whatever symlink we were invoked through.
+# Plists must reference real paths so launchd-spawned processes don't end up
+# blocked by macOS TCC if the symlink lives in ~/Documents.
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 TTYD_PLIST="$LAUNCH_AGENTS/com.harcourts.ttyd.plist"
 UPLOADER_PLIST="$LAUNCH_AGENTS/com.harcourts.uploader.plist"
