@@ -42,11 +42,14 @@ If `claude` says you're using the API and not the subscription, sign out (`/logo
 
 ## Step 2 — Clone the project and create `.env`
 
-Pick a stable location on the Mac. The default in this guide is `~/harcourts-listings`.
+**Important: pick a location OUTSIDE `~/Documents`, `~/Desktop`, and `~/Downloads`.** macOS protects those folders at the system level — background services launched by `launchd` (which is how ttyd and the uploader run) cannot read them without per-binary "Full Disk Access" grants. The installer fails fast and refuses to set up the services if you've cloned into one of those folders.
+
+`~/harcourts-listings/` is the recommended default. The home folder root, `~/Code/`, `~/Projects/`, or anywhere under `/opt/` are also fine.
 
 ```sh
 cd ~
-# If you already have it elsewhere, just cd into that directory.
+# If you already have it elsewhere (NOT in Documents/Desktop/Downloads),
+# just cd into that directory.
 git clone <your-repo-url> harcourts-listings || true
 cd harcourts-listings
 cp .env.example .env
