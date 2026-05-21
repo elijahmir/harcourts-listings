@@ -4,6 +4,10 @@ A shared system on one MacBook that helps the consultants at Harcourts Ulverston
 
 ---
 
+## For the office admin: setting up the host Mac
+
+Follow [docs/HOST-SETUP.md](docs/HOST-SETUP.md) once. It walks through installing Claude Code, running the host installer (`./scripts/install-host.sh`), signing into Tailscale, and inviting staff devices.
+
 ## For staff: how to start a listing
 
 There are two ways in:

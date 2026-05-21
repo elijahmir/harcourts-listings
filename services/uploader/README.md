@@ -43,17 +43,19 @@ Expected: JSON with `ok: true` and the saved relative path.
 
 ## Running it as a service on the Mac
 
-`launchd/com.harcourts.uploader.plist` is a LaunchAgent that keeps the uploader running. Copy it to `~/Library/LaunchAgents/`, edit the paths inside to match your install, and load it:
+Use `scripts/install-host.sh` from the project root. It detects paths on the running machine and writes `~/Library/LaunchAgents/com.harcourts.uploader.plist` with the right absolute paths. After install the service runs on every boot and restarts on crash.
 
 ```
-launchctl load ~/Library/LaunchAgents/com.harcourts.uploader.plist
+./scripts/install-host.sh           # install / reinstall
+./scripts/install-host.sh restart   # reload after .env changes
+./scripts/install-host.sh stop      # unload
 ```
 
-Logs go to `services/uploader/uploader.log` (relative to the project root).
+Logs are written to `services/uploader/uploader.log` (relative to the project root).
 
 ## What lives here
 
 - `server.py` — the FastAPI application
 - `static/` — the picker page, the upload page, and shared CSS
 - `requirements.txt` — pinned-minimum versions
-- `launchd/` — macOS LaunchAgent plist
+- `uploader.log` — runtime log, gitignored
