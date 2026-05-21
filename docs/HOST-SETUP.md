@@ -17,26 +17,34 @@ If anything in the list is missing, sort it before continuing — the rest of th
 
 ---
 
-## Step 1 — Install Claude Code CLI
+## Step 1 — Install Claude Code CLI (standalone)
 
-The whole system pivots around the `claude` command being available on the Mac and logged into your office Anthropic account.
+The whole system pivots on the `claude` command being on the Mac's PATH and signed in. **Use the npm install. Do not rely on Claude Desktop's bundled Claude Code** — it works fine for Desktop itself but is unauthenticated when launched by ttyd from a headless shell, which puts a sign-in prompt in front of every staff session.
 
 ```sh
+# Node.js first (if missing): brew install node
 npm install -g @anthropic-ai/claude-code
 ```
 
-If you don't have Node.js, install it via Homebrew first: `brew install node`.
+The installer script (`scripts/install-host.sh`) runs this for you automatically if `claude` is missing and `npm` is present, so in practice you usually skip this step.
 
-Verify:
+### Sign in (one time, only if needed)
+
+If you already use **Claude Desktop** signed into the same Anthropic account, you don't need to sign in again — the standalone Claude Code reads tokens from the macOS Keychain that Claude Desktop also uses. Confirm with:
 
 ```sh
-claude --version
-claude
+claude auth status
 ```
 
-The second command should open Claude Code's interactive prompt. Sign in when it asks. Pick the Claude account that owns your subscription. Type `/exit` to leave once you've confirmed it works.
+You should see `"loggedIn": true`, `"apiProvider": "firstParty"`, and `"subscriptionType": "pro"` (or higher). If you see `"loggedIn": false`, run:
 
-If `claude` says you're using the API and not the subscription, sign out (`/logout`) and sign in again, choosing the subscription option.
+```sh
+claude auth login
+```
+
+Follow the browser prompt. Pick the **subscription** option (not API) so quota is consumed correctly.
+
+If `auth status` shows `apiProvider: "anthropic"`, that's the API path and will burn token credits. Log out (`claude auth logout`) and sign in via the subscription option.
 
 ---
 
