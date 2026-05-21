@@ -1,0 +1,6 @@
+outputs/*.docx
+consultants/*/sessions/*
+.DS_Store
+*.log
+node_modules/
+.env
