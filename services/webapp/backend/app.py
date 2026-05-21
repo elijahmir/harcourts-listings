@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routes import consultants, sessions
+from .routes import consultants, messages, sessions, uploads, ws
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +50,9 @@ app.add_middleware(
 
 app.include_router(consultants.router)
 app.include_router(sessions.router)
+app.include_router(messages.router)
+app.include_router(uploads.router)
+app.include_router(ws.router)
 
 
 @app.get("/healthz")
