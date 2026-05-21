@@ -1,5 +1,6 @@
 outputs/*.docx
 consultants/*/sessions/*
+!consultants/*/sessions/.gitkeep
 .DS_Store
 *.log
 node_modules/
