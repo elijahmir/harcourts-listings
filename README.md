@@ -4,6 +4,8 @@ System for generating property-listing content in each consultant's authentic vo
 
 The system runs as a browser chat hosted on one office MacBook. Teammates connect from their phones, laptops, or desktops over Tailscale; identity is captured by a one-time "what's your name?" prompt — no sign-in. The Claude work uses the office Mac's signed-in Claude Max subscription, so per-turn cost is flat.
 
+**Trust model:** all permissions are per host Mac, not per user. Setting up the production Mac once (claude login + four lines in `.claude/settings.json`) makes the chat work identically for every teammate — there is no per-session approval step. See [docs/HOST-SETUP.md](docs/HOST-SETUP.md#trust-model--what-gets-approved-once-by-whom).
+
 ---
 
 ## Setting up a fresh Mac

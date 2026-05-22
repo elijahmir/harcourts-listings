@@ -2,7 +2,23 @@
 
 End-to-end setup for a fresh Mac. Designed so a human OR a Claude Code agent reading this file can complete the whole thing top-to-bottom without external context. Every step lists the exact command, the expected outcome, and what to do if it doesn't.
 
-> **TL;DR for someone who's done this before:** `git clone`, `./scripts/install.sh`, `claude login`, paste four lines into `.claude/settings.json`, `./scripts/install.sh launchd`, optional Tailscale, done.
+> **TL;DR for someone who's done this before:** `git clone`, `./scripts/install.sh`, `claude login`, paste four lines into `.claude/settings.json`, `./scripts/install.sh verify`, `./scripts/install.sh launchd`, optional Tailscale, done.
+
+---
+
+## Trust model — what gets approved once, by whom
+
+Before you start: **permissions in this system are per host Mac, not per user.** Setting up the production Mac once makes the chat work identically for every teammate — there is no per-session approval, no per-user policy, no in-chat "click Allow" dialog. The single source of trust is:
+
+1. **The signed-in Anthropic account** on this Mac (one `claude login` covers it).
+2. **`.claude/settings.json`** at the project root — allow/deny rules read by every spawned `claude` subprocess.
+3. **`services/backend/app/runner.py`** — per-spawn flags (`--permission-mode bypassPermissions`, `--add-dir consultants/{slug}/`, `--add-dir shared/`, `--add-dir outputs/`).
+
+The chat UI captures a "user name" in `localStorage` for audit attribution (so you can see who saved which voice rule), but Claude Code itself has no awareness of who's chatting. Every teammate's session goes through the same binary, same account, same settings, same flags.
+
+This is the right architectural simplification for an office of 7–10 staff sharing one Claude Max plan, but worth being explicit: **anyone who can reach the chat URL has identical effective permissions.** The Tailscale Funnel URL (step 8) IS the access boundary; the `.claude/settings.json` deny list is the destructive-action safety net.
+
+(Technical detail: the subprocess invokes `claude --print`, which per the Claude Code 2.1.x help text **skips the workspace trust dialog in non-interactive mode**. So even the one-time "do you trust this folder?" prompt that ordinarily fires on first `claude` invocation in a new directory is bypassed in our setup.)
 
 ---
 
@@ -119,7 +135,30 @@ This is the only manual edit to `settings.json` required. Without it, the chat-d
 
 ---
 
-## 6. Auto-start on boot (recommended)
+## 6. Verify the chat permissions are in place
+
+Run the one-shot verifier:
+
+```bash
+./scripts/install.sh verify
+```
+
+It spawns a minimal `claude --print` with the exact flags `runner.py` uses in production, sends a one-word prompt, and confirms the response is sane. Consumes ~10 tokens from your Claude Max plan.
+
+Expected output:
+
+```
+==> Verify chat permissions
+    using consultant: colin-tunn
+    spawning a minimal `claude --print` to confirm everything's in place…
+  ✓ claude responded cleanly. This Mac is ready.
+```
+
+If it fails, the script prints the most likely causes. Almost always it's missing `claude login` or missing settings.json entries.
+
+---
+
+## 7. Auto-start on boot (recommended)
 
 Install the two launchd services so the backend (port 3000) and frontend (port 3010) come up automatically on every boot and restart on crash:
 
@@ -141,7 +180,7 @@ If something's broken: `tail -50 /tmp/harcourts-backend.log` or `/tmp/harcourts-
 
 ---
 
-## 7. (If you have real VaultRE keys) Update `.env`
+## 8. (If you have real VaultRE keys) Update `.env`
 
 Open `.env` (NOT `.env.example`) and paste in the actual `VAULTRE_API_KEY` and `VAULTRE_API_TOKEN` values. The VaultRE integration is roadmapped but the values being present doesn't break anything if it's not used yet.
 
@@ -153,7 +192,7 @@ Restart the backend so it picks up new env values:
 
 ---
 
-## 8. Remote access via Tailscale Funnel (so teammates' phones can reach the chat)
+## 9. Remote access via Tailscale Funnel (so teammates' phones can reach the chat)
 
 Without Tailscale: only devices on the office Wi-Fi can hit `http://192.168.x.x:3010`. To let teammates connect from anywhere:
 
@@ -170,7 +209,7 @@ To stop publishing the funnel: `tailscale funnel reset`.
 
 ---
 
-## 9. Smoke test the whole stack
+## 10. Smoke test the whole stack
 
 From the host Mac (or any device on the funnel URL):
 
@@ -248,5 +287,6 @@ If you've been asked to set up this system on a fresh Mac:
 3. Run `./scripts/install.sh` — wait for it to finish (1–3 minutes).
 4. Tell the user: "I've finished the scripted bootstrap. Three things need a human: (a) run `claude login` to sign in, (b) edit `.claude/settings.json` to add four Bash patterns — I'll paste them — (c) decide whether to install launchd auto-start and/or Tailscale Funnel."
 5. Paste the four `Bash(...)` lines from step 5 above. Wait for confirmation.
-6. After confirmation, run `./scripts/install.sh launchd` if the user wants auto-start.
-7. Run the smoke-test commands from step 9 and report results.
+6. **Definitive check:** run `./scripts/install.sh verify`. If it prints `✓ claude responded cleanly. This Mac is ready.`, the permission chain is complete and every teammate's chat will work the same way. If it fails, follow the printed remedies and re-run.
+7. After verify passes, run `./scripts/install.sh launchd` if the user wants auto-start.
+8. Run the smoke-test commands from step 10 and report results.

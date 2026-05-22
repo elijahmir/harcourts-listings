@@ -6,6 +6,7 @@
 #
 #   ./scripts/install.sh             # full install (default)
 #   ./scripts/install.sh check       # just report state, change nothing
+#   ./scripts/install.sh verify      # spawn claude --print, confirm permissions
 #   ./scripts/install.sh launchd     # install both launchd services
 #   ./scripts/install.sh restart     # reload launchd services
 #   ./scripts/install.sh uninstall   # stop services + remove plists
@@ -313,6 +314,81 @@ cmd_uninstall() {
   note  "  (the repo and data/ are untouched — delete those manually if needed)"
 }
 
+# --- verify ---------------------------------------------------------------
+# Spawns `claude --print` with the exact flags services/backend/app/runner.py
+# uses, sends a one-word prompt, and confirms the response is sane. This is
+# the definitive "is this Mac fully set up?" check — exercises:
+#   - claude binary on PATH + signed-in account
+#   - --add-dir scoping for consultant + shared + outputs
+#   - --permission-mode bypassPermissions auto-approving tools
+#   - .claude/settings.json deny rules not blocking the basics
+# If this passes, every teammate's chat session will work the same way (the
+# chat agent has no per-user permission concept; it's per-host).
+
+cmd_verify() {
+  hdr "Verify chat permissions"
+
+  if ! command -v claude >/dev/null 2>&1; then
+    red "  claude CLI not on PATH. Install Claude Code first."
+    return 1
+  fi
+
+  # Pick the first real consultant folder (alphabetical, skipping _template).
+  local consultant_folder=""
+  if [[ -d "$PROJECT_ROOT/consultants" ]]; then
+    for d in "$PROJECT_ROOT/consultants"/*/; do
+      local name; name="$(basename "$d")"
+      [[ "$name" == _* ]] && continue
+      consultant_folder="${d%/}"
+      break
+    done
+  fi
+  if [[ -z "$consultant_folder" ]]; then
+    red "  no real consultant folder found under consultants/. Repo incomplete?"
+    return 1
+  fi
+
+  note "using consultant: $(basename "$consultant_folder")"
+  note "spawning a minimal \`claude --print\` to confirm everything's in place…"
+  note "(this consumes about 10 tokens from your Claude Max plan)"
+
+  local prompt="Smoke check from install.sh — reply with exactly the single word OK and nothing else."
+  # NOTE: --add-dir is variadic (<directories...>), so passing the prompt as
+  # a positional argument after a chain of --add-dir gets it eaten as another
+  # directory. Stdin sidesteps that — it's also how runner.py feeds prompts
+  # to the subprocess in production.
+  local output rc
+  set +e
+  output="$(printf '%s' "$prompt" | claude --print \
+    --permission-mode bypassPermissions \
+    --add-dir "$consultant_folder" \
+    --add-dir "$PROJECT_ROOT/shared" \
+    --add-dir "$PROJECT_ROOT/outputs" \
+    --input-format text 2>&1)"
+  rc=$?
+  set -e
+
+  echo
+  if [[ $rc -eq 0 ]] && grep -q "OK" <<<"$output"; then
+    green "  ✓ claude responded cleanly. This Mac is ready."
+    note  "  Every teammate's chat session will work identically — permissions"
+    note  "  in this system are per host (this Mac), not per user."
+    return 0
+  fi
+
+  red "  ✗ verification failed (claude exit code: $rc)"
+  echo
+  note "Captured output (first 10 lines):"
+  echo "$output" | head -10 | sed 's/^/      /'
+  echo
+  note "Most likely causes, in order:"
+  note "  1. Not signed in. Fix: claude login"
+  note "  2. Missing settings.json entries — see HOST-SETUP.md step 5."
+  note "  3. claude CLI version too old. Fix: brew upgrade claude  (or reinstall)"
+  note "  4. Network / Anthropic outage. Try again in a minute."
+  return 1
+}
+
 # --- next-steps banner -----------------------------------------------------
 
 print_next_steps() {
@@ -336,14 +412,21 @@ print_next_steps() {
        "Bash(ls ./consultants/**)",
        "Bash(cat ./consultants/**)"
 
-3. Auto-start the services on boot (optional but recommended):
+3. Confirm the chat permissions are in place (spawns one tiny test turn):
+
+       ./scripts/install.sh verify
+
+   If this passes, every teammate's chat works the same way (the system
+   is per-host, not per-user — see docs/HOST-SETUP.md#trust-model).
+
+4. Auto-start the services on boot (optional but recommended):
 
        ./scripts/install.sh launchd
 
 For remote access from teammates' phones, see docs/HOST-SETUP.md
 (Tailscale Funnel section).
 
-Smoke test:
+Smoke test the running services:
    curl -s http://127.0.0.1:3000/healthz | python3 -m json.tool
    open http://127.0.0.1:3010
 
@@ -356,6 +439,7 @@ main() {
   local sub="${1:-install}"
   case "$sub" in
     check)     cmd_check ;;
+    verify)    cmd_verify ;;
     launchd)   cmd_launchd ;;
     restart)   cmd_restart ;;
     uninstall) cmd_uninstall ;;
@@ -370,7 +454,7 @@ main() {
       ;;
     *)
       red "Unknown subcommand: $sub"
-      echo "Usage: $0 [check|install|launchd|restart|uninstall]"
+      echo "Usage: $0 [check|install|verify|launchd|restart|uninstall]"
       exit 1
       ;;
   esac
