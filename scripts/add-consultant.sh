@@ -58,7 +58,7 @@ else
 fi
 
 find "$TARGET_DIR" -type f -name "*.md" -print0 \
-  | xargs -0 "${SED_INPLACE[@]}" "s/{CONSULTANT_NAME}/$FULL_NAME/g"
+  | xargs -0 "${SED_INPLACE[@]}" -e "s/{CONSULTANT_NAME}/$FULL_NAME/g" -e "s/{CONSULTANT_SLUG}/$SLUG/g"
 
 cat <<NEXT
 

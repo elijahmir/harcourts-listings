@@ -312,27 +312,36 @@ export function Chat({ userName, backendUrl }: ChatProps) {
       <footer className="fixed inset-x-0 bottom-0 border-t bg-background/95 backdrop-blur">
         <div className="mx-auto w-full max-w-3xl space-y-2 p-4">
           {(uploads.length > 0 || uploadError) && (
-            <div className="flex flex-wrap items-center gap-2">
-              {uploads.map((u) => (
-                <span
-                  key={u.stored_filename}
-                  className="inline-flex items-center gap-1 rounded-full border bg-muted px-2.5 py-1 text-xs"
-                >
-                  <span className="max-w-[180px] truncate">
-                    {u.original_filename}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removeUpload(u.stored_filename)}
-                    className="text-muted-foreground hover:text-foreground"
-                    aria-label={`Remove ${u.original_filename}`}
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                {uploads.map((u) => (
+                  <span
+                    key={u.stored_filename}
+                    className="inline-flex items-center gap-1 rounded-full border bg-muted px-2.5 py-1 text-xs"
                   >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
-              ))}
-              {uploadError && (
-                <span className="text-xs text-destructive">{uploadError}</span>
+                    <span className="max-w-[180px] truncate">
+                      {u.original_filename}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeUpload(u.stored_filename)}
+                      className="text-muted-foreground hover:text-foreground"
+                      aria-label={`Remove ${u.original_filename}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+                {uploadError && (
+                  <span className="text-xs text-destructive">{uploadError}</span>
+                )}
+              </div>
+              {uploads.length > 0 && (
+                <p className="text-[11px] text-muted-foreground">
+                  Tip: say &quot;save this for future listings&quot; in your
+                  next message to keep it in this consultant&apos;s permanent
+                  knowledge. Otherwise it&apos;s attached to this chat only.
+                </p>
               )}
             </div>
           )}

@@ -55,4 +55,24 @@ When you receive feedback like this:
 
 Do not save trivial one-off corrections (a typo fix, a single word swap with no pattern). Save anything that should change future behaviour.
 
-Also watch for sample listings the user provides during a session. If the user pastes or uploads a past listing the consultant wrote, ask: "Should I add this to Jarrod Burr's sample library for future tone reference?" If yes, save it to knowledge/sample-listings/ with a descriptive filename.
+## Routing uploaded files
+
+When the user attaches a file via the chat UI, their message arrives with a header at the top:
+
+    📎 Attached N file(s) to `consultants/jarrod-burr/sessions/session-XXXXXXXX/photos/`:
+    • some-filename.docx
+
+Decide where it belongs based on the conversation:
+
+- **For THIS listing only** (property photos, floor plan, contract draft for the current property): leave the file in `sessions/.../photos/`. Read it as Phase 1 onwards requires.
+
+- **Permanent training material** (a past listing this consultant wrote, a brand handbook, a voice reference) AND the user explicitly says so ("save this as a sample", "add to Jarrod Burr's library", "use this to learn my voice"): move it to `knowledge/sample-listings/` (or `knowledge/brand-guides/` for a corporate handbook). Use this filename convention so ownership is visible at a glance:
+
+      knowledge/sample-listings/jarrod-burr__YYYY-MM-DD__<short-name>.<ext>
+
+  Do the move with `Bash(mv "old/path" "new/path")`. Your `--add-dir` scope is *this consultant's folder only* — you physically cannot write into another consultant's directory, which is how cross-consultant mixing is prevented. If the move fails with a permission error, the operator hasn't yet allowed `Bash(mv ./consultants/**)` — tell them the one-line fix is to add it to `.claude/settings.json`'s allow list.
+
+  After the move, briefly confirm: "Saved to knowledge/sample-listings/{filename}. Future Jarrod Burr sessions will read it for tone calibration."
+
+If the user's intent is unclear, ask: "For this listing only, or should I keep it permanently in Jarrod Burr's sample library for future tone reference?"
+
