@@ -3,66 +3,75 @@
 @tailwind utilities;
 
 @layer base {
+  /* Color strategy: restrained (impeccable's product default) — tinted
+   * neutrals at hue 215 (slate-blue, real-estate-appropriate), one
+   * primary that carries CTAs, no decorative accents. Nothing is pure
+   * #fff or #000 — every neutral has a hint of brand hue so the
+   * interface doesn't feel synthetic.
+   *
+   * Hue 215 = slate-blue. Says "professional, trustworthy, considered."
+   * Distinguishes us from the default-Claude.ai grey-on-grey aesthetic
+   * without being on-the-nose about real estate. */
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.5rem;
+    --background: 215 25% 99%;
+    --foreground: 215 30% 12%;
+    --card: 215 25% 99%;
+    --card-foreground: 215 30% 12%;
+    --primary: 215 35% 18%;
+    --primary-foreground: 215 25% 99%;
+    --secondary: 215 18% 95%;
+    --secondary-foreground: 215 30% 12%;
+    --muted: 215 18% 95%;
+    --muted-foreground: 215 14% 42%;
+    --accent: 215 18% 92%;
+    --accent-foreground: 215 30% 12%;
+    --destructive: 0 70% 48%;
+    --destructive-foreground: 215 25% 99%;
+    --border: 215 18% 90%;
+    --input: 215 18% 90%;
+    --ring: 215 35% 30%;
+    --radius: 0.625rem;
   }
 
   .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 240 4.9% 83.9%;
+    --background: 215 30% 6%;
+    --foreground: 215 12% 96%;
+    --card: 215 30% 8%;
+    --card-foreground: 215 12% 96%;
+    --primary: 215 12% 96%;
+    --primary-foreground: 215 30% 12%;
+    --secondary: 215 22% 14%;
+    --secondary-foreground: 215 12% 96%;
+    --muted: 215 22% 14%;
+    --muted-foreground: 215 12% 68%;
+    --accent: 215 22% 16%;
+    --accent-foreground: 215 12% 96%;
+    --destructive: 0 62% 44%;
+    --destructive-foreground: 215 12% 96%;
+    --border: 215 22% 14%;
+    --input: 215 22% 14%;
+    --ring: 215 12% 80%;
   }
 
   @media (prefers-color-scheme: dark) {
     :root {
-      --background: 240 10% 3.9%;
-      --foreground: 0 0% 98%;
-      --card: 240 10% 3.9%;
-      --card-foreground: 0 0% 98%;
-      --primary: 0 0% 98%;
-      --primary-foreground: 240 5.9% 10%;
-      --secondary: 240 3.7% 15.9%;
-      --secondary-foreground: 0 0% 98%;
-      --muted: 240 3.7% 15.9%;
-      --muted-foreground: 240 5% 64.9%;
-      --accent: 240 3.7% 15.9%;
-      --accent-foreground: 0 0% 98%;
-      --destructive: 0 62.8% 30.6%;
-      --destructive-foreground: 0 0% 98%;
-      --border: 240 3.7% 15.9%;
-      --input: 240 3.7% 15.9%;
-      --ring: 240 4.9% 83.9%;
+      --background: 215 30% 6%;
+      --foreground: 215 12% 96%;
+      --card: 215 30% 8%;
+      --card-foreground: 215 12% 96%;
+      --primary: 215 12% 96%;
+      --primary-foreground: 215 30% 12%;
+      --secondary: 215 22% 14%;
+      --secondary-foreground: 215 12% 96%;
+      --muted: 215 22% 14%;
+      --muted-foreground: 215 12% 68%;
+      --accent: 215 22% 16%;
+      --accent-foreground: 215 12% 96%;
+      --destructive: 0 62% 44%;
+      --destructive-foreground: 215 12% 96%;
+      --border: 215 22% 14%;
+      --input: 215 22% 14%;
+      --ring: 215 12% 80%;
     }
   }
 }
