@@ -196,8 +196,26 @@ export function Chat({ userName, backendUrl }: ChatProps) {
   function submitDraft() {
     const text = draft.trim();
     if (!text || !slug || isStreaming || status !== "ready") return;
-    send({ content: text });
+
+    // If files were uploaded since the last send, bundle them into the
+    // message text. That way (a) the user's bubble shows what was attached,
+    // (b) Claude reads the same content and knows the on-disk paths, and
+    // (c) the attachments are tied to the message that referenced them in
+    // the persisted history.
+    let composed = text;
+    if (uploads.length > 0) {
+      // All uploads in a single send share a parent dir; derive it once.
+      const firstPath = uploads[0].relative_path;
+      const parentDir = firstPath.slice(0, firstPath.lastIndexOf("/"));
+      const fileList = uploads
+        .map((u) => `• ${u.original_filename}`)
+        .join("\n");
+      composed = `📎 Attached ${uploads.length} file${uploads.length === 1 ? "" : "s"} to \`${parentDir}/\`:\n${fileList}\n\n${text}`;
+    }
+
+    send({ content: composed });
     setDraft("");
+    setUploads([]); // consumed — next message starts a fresh attachment list
   }
 
   async function handleFiles(files: File[]) {

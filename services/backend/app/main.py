@@ -188,6 +188,12 @@ async def chat_ws(websocket: WebSocket) -> None:
                     consultant_slug=slug, user_name=user_name
                 )
                 session_id = session["id"]
+                # Cutting a new session ALSO means we can't honor a stale
+                # claude_session_id from the client. If we did, claude
+                # would --resume a jsonl on disk whose history doesn't
+                # match our DB ("Hi again!" effect). Force a fresh
+                # Claude CLI session too.
+                resume_id = None
 
             log.info(
                 "turn: session=%s consultant=%s user=%s len=%d resume=%s",
