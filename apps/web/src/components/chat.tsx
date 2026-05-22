@@ -6,6 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { SaveLearningForm } from "@/components/save-learning-form";
+import { SessionPicker } from "@/components/session-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { UploadButton } from "@/components/upload-button";
@@ -17,6 +18,7 @@ import {
   useChat,
   type ChatMessage,
   type ConnectionStatus,
+  type SessionRow,
   type UploadedFile,
 } from "@/lib/ws";
 import {
@@ -74,6 +76,9 @@ export function Chat({ userName, backendUrl }: ChatProps) {
         const initial = saved && list.includes(saved) ? saved : list[0] ?? null;
         setSlug(initial);
         if (initial) {
+          // Persist the default consultant slug too, so localStorage is the
+          // canonical record of "which consultant am I on" from first load.
+          setConsultantSlug(initial);
           const sid = getSessionId(initial);
           setInitialSessionId(sid);
           setSessionIdState(sid);
@@ -174,6 +179,20 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     reset();
   }
 
+  function pickSession(s: SessionRow) {
+    if (!slug || s.id === sessionId) return;
+    setSessionId(slug, s.id);
+    setClaudeSessionId(slug, s.claude_session_id);
+    setSessionIdState(s.id);
+    setInitialSessionId(s.id);
+    setInitialClaudeSessionId(s.claude_session_id);
+    setUploads([]);
+    setSavedLearningMessageIds(new Set());
+    setEditingLearningForId(null);
+    replayedForRef.current = null; // force history replay
+    reset();
+  }
+
   function submitDraft() {
     const text = draft.trim();
     if (!text || !slug || isStreaming || status !== "ready") return;
@@ -242,6 +261,12 @@ export function Chat({ userName, backendUrl }: ChatProps) {
         status={status}
         onNewConversation={startNewConversation}
         onReconnect={reconnect}
+        backendUrl={backendUrl}
+        currentSessionId={sessionId}
+        onPickSession={pickSession}
+        // Re-bumps the picker's fetch so a freshly-finished turn appears
+        // without having to close + reopen.
+        sessionsRefreshKey={messages.length}
       />
 
       <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pb-44">
@@ -340,6 +365,10 @@ interface HeaderProps {
   status: ConnectionStatus;
   onNewConversation: () => void;
   onReconnect: () => void;
+  backendUrl: string;
+  currentSessionId: string | null;
+  onPickSession: (s: SessionRow) => void;
+  sessionsRefreshKey: unknown;
 }
 
 function Header({
@@ -350,6 +379,10 @@ function Header({
   status,
   onNewConversation,
   onReconnect,
+  backendUrl,
+  currentSessionId,
+  onPickSession,
+  sessionsRefreshKey,
 }: HeaderProps) {
   return (
     <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
@@ -372,6 +405,14 @@ function Header({
             </option>
           ))}
         </select>
+
+        <SessionPicker
+          backendUrl={backendUrl}
+          consultantSlug={slug}
+          currentSessionId={currentSessionId}
+          onPick={onPickSession}
+          refreshKey={sessionsRefreshKey}
+        />
 
         <Button
           variant="ghost"

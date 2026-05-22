@@ -335,10 +335,51 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   const reset = useCallback(() => {
     setMessages([]);
     liveAssistantIdRef.current = null;
+    // Clear the WS session refs too. They get set directly by the `done`
+    // handler when a turn finishes, which means they live OUTSIDE the
+    // initialSessionId/initialClaudeSessionId state in the parent. If we
+    // only cleared `messages` here, the next send would carry the stale
+    // ids and the backend would re-attach to the previous session instead
+    // of creating a fresh one (this is exactly what the session-picker
+    // smoke test caught).
+    sessionIdRef.current = null;
+    claudeSessionIdRef.current = null;
     setIsStreaming(false);
   }, []);
 
   return { messages, status, isStreaming, send, reset, reconnect, setMessages };
+}
+
+// --- Session list -----------------------------------------------------------
+
+export interface SessionRow {
+  id: string;
+  claude_session_id: string | null;
+  consultant_slug: string;
+  user_name: string;
+  started_at: string;
+  last_active_at: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_usd: number;
+}
+
+/** Fetch recent sessions, optionally filtered to a single consultant. */
+export async function fetchSessions(
+  backendUrl: string,
+  consultantSlug?: string,
+  limit = 50,
+): Promise<SessionRow[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (consultantSlug) params.set("consultant_slug", consultantSlug);
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/sessions?${params.toString()}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error(`fetchSessions ${res.status}: ${res.statusText}`);
+  }
+  return (await res.json()) as SessionRow[];
 }
 
 // --- History replay ---------------------------------------------------------
