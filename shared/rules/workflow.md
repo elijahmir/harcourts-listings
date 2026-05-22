@@ -4,91 +4,61 @@ Run these phases in order. Do not skip ahead. After each phase, present the resu
 
 ## Phase 1 — Collect inputs
 
-This phase has three parts: capture the address, create the session, and get the property's photos and floor plan onto the Mac so you can analyse them. Run the steps in order. Do not move on to Phase 2 until you have visually verified files exist on disk.
+This phase has two parts: confirm the address, and verify the property photos and floor plan have been uploaded. Move to Phase 2 only after the files exist in the session folder.
+
+> **About this flow.** The chat UI handles uploads via the paperclip button under the message input. The backend creates the session folder on first upload and converts HEIC → JPEG automatically. You do **not** construct an upload URL, mkdir the session folder yourself, or write a `session.json` — the backend takes care of those.
 
 ### Step 1.1 — Confirm the address
 
 Ask: "What is the full property address?" Wait for the answer.
 
-When the user replies, repeat the address back in one short sentence so they can catch a typo before you create a folder named after it. Example: "Got it — 22 Dial Road, Penguin TAS 7316. Correct?"
+When the user replies, repeat the address back in one short sentence so they can catch a typo. Example: "Got it — 22 Dial Road, Penguin TAS 7316. Correct?"
 
-### Step 1.2 — Create the session folder
+### Step 1.2 — Ask for photos and floor plan via the chat's attachment button
 
-The launcher (`scripts/create-listing.sh`) exports these environment variables. Read them via `Bash` (e.g. `echo $HARCOURTS_CONSULTANT_SLUG`):
+Tell the user, calibrated to this consultant's voice, something like:
 
-| Variable                       | Used for                                                  |
-| ------------------------------ | --------------------------------------------------------- |
-| `HARCOURTS_CONSULTANT_SLUG`    | The slug of the active consultant (e.g. `wendy-squibb`).  |
-| `HARCOURTS_CONSULTANT_NAME`    | Full name for messages and metadata.                       |
-| `HARCOURTS_USER_EMAIL`         | The staff member's email captured at session start.        |
-| `HARCOURTS_UPLOADER_BASE_URL`  | Base URL of the mobile uploader.                          |
+> "Great. To put the listing together I need property photos (interior + exterior + any aerials) and the floor plan if you have it. Use the **paperclip button** below the message input to attach them — multiple files in one go is fine, or send them across in batches. Let me know once you're done."
 
-If any required variable is empty (the user ran `claude` directly instead of the launcher), ask the user for the missing value before continuing.
+Then wait. Do not press ahead until the user has attached files.
 
-Make a session folder at:
+### Step 1.3 — Verify files arrived
 
-    consultants/{HARCOURTS_CONSULTANT_SLUG}/sessions/{YYYY-MM-DD}_{address-slug}/
+When the user attaches files via the chat UI, their next message will arrive with a header at the top like:
 
-…where `{address-slug}` is a short kebab-case form of the street address — lowercase, ASCII letters and digits only, hyphens between words, no street type if it makes the slug too long. Example: `22-dial-road-penguin`. Also create an empty `photos/` subfolder inside it.
+    📎 Attached N file(s) to `consultants/{slug}/sessions/session-XXXXXXXX/photos/`:
+    • photo-1.jpg
+    • floorplan.pdf
 
-Drop a small `session.json` at the root of the session folder so the rest of the system has the context:
+That is your signal. Read the file list straight from the header — no need to `ls` the folder yourself. For each file:
 
-```json
-{
-  "consultant_slug": "...",
-  "consultant_name": "...",
-  "user_email": "...",
-  "address": "<the confirmed address>",
-  "started_at": "<ISO-8601 UTC, e.g. 2026-05-21T14:33:00Z>"
-}
-```
+- `.jpg`, `.jpeg`, `.png`, `.webp` → property photo.
+- `.pdf` → likely floor plan or contract attachment.
+- Anything with `floor`, `plan`, or `fp` in the name → the floor plan.
+- `.heic` files should not appear — the backend converts to JPEG. If you see one, the conversion fell through; flag it to the operator after the session.
 
-### Step 1.3 — Hand the user the upload link
+Acknowledge in plain language, in this consultant's voice. Examples:
 
-Construct the link by concatenating the base URL, the slug, and the session folder name:
+> "Got it — 8 photos and a floor plan in your session folder. Ready to brief?"
+> "I see 6 photos but no floor plan yet — happy to proceed without it, or do you want to grab one first?"
 
-    {HARCOURTS_UPLOADER_BASE_URL}/u/{HARCOURTS_CONSULTANT_SLUG}/{session-folder-name}
+If the user says "done" but no `📎 Attached` header arrived, reply: "I haven't received any files yet — try attaching via the paperclip again, or tell me if the upload isn't cooperating and I'll suggest a workaround."
 
-Send the URL in plain language. Calibrate the tone to the consultant's voice, but the substance is:
+### Step 1.4 — Fallbacks if the chat upload won't work
 
-> "Session is ready. Open this on your phone, laptop, or desktop to drop in the photos and the floor plan:
->
->     {the full URL}
->
-> Photos and floor plan together is fine — pick everything in one go. The page will say 'Done' when it has them. Let me know here once you're back."
+If the user can't attach via the paperclip (mobile flake, network issue, locked browser), use one of these:
 
-Then wait for the user to come back.
-
-### Step 1.4 — Verify the files actually arrived
-
-When the user says they're done, do NOT trust their word alone. Look on disk yourself with `Bash` (`ls -la consultants/{slug}/sessions/{session}/photos/`). For each file:
-
-- Anything ending `.jpg`, `.jpeg`, `.png`, `.webp` → property photo.
-- Anything ending `.pdf` → likely floor plan or contract attachment.
-- Any filename containing `floor`, `plan`, `fp`, or with unusual aspect ratio → likely the floor plan.
-- HEIC files should not appear — the uploader converts them to JPEG automatically. If you see one, the conversion fell through (libheif missing); flag this to the operator after the session.
-
-Report back to the user. Examples:
-
-> "Got it. I see **8 photos** and **1 floor plan** in your session folder. Ready to brief?"
->
-> "I see **6 photos** but no floor plan yet — was that intentional, or should I wait?"
->
-> "The folder still looks empty. Open the link again and make sure the page shows 'Done' before switching back."
-
-### Step 1.5 — Fallbacks if the upload page is unreachable
-
-If `HARCOURTS_UPLOADER_BASE_URL` is empty, or the user reports the page won't load, give them the manual paths in this order:
-
-1. **AirDrop (iPhone, in the office).** "AirDrop the photos to the Mac. They'll land in your Downloads folder; tell me when they're there and I'll move them into the session." Then move them with `mv ~/Downloads/IMG_*.jpg consultants/{slug}/sessions/{session}/photos/`.
-2. **Drag into the session folder.** "Open the session folder on the Mac at this path: `consultants/{slug}/sessions/{session}/photos/`. Drop the files in." Then list the folder to confirm.
+1. **AirDrop (iPhone, in the office).** "AirDrop the photos to the Mac — they'll land in your Downloads folder. Tell me when they're there and I'll move them into the session." Then move with `Bash(mv ~/Downloads/IMG_*.jpg <session-folder>/photos/)` (requires `Bash(mv ./consultants/**)` in `.claude/settings.json`).
+2. **Drag into the session folder.** "Open `consultants/{slug}/sessions/<session-folder>/photos/` in Finder on the Mac and drop the files there." Then `ls -la` that folder to confirm.
 3. **Paste image URLs.** Accept publicly accessible image URLs and download them with `curl -L -o` into the photos folder.
 
-After fallback, run Step 1.4 to verify on disk before continuing.
+The session-folder name is whatever appeared in the most recent `📎 Attached` header. If no files have been uploaded yet, you can ask the user to send a single file via the paperclip first so the backend creates the folder — or `mkdir -p consultants/{slug}/sessions/session-<short-id>/photos/` yourself and tell the user the path.
 
-### Step 1.6 — Future: VaultRE pull
+After any fallback, run the Step 1.3 verification before continuing.
 
-When the VaultRE integration is wired in (see ROADMAP.md and integrations/vaultre/ANALYSIS.md), offer a fourth path: "I can pull the photos straight from VaultRE — what's the property's reference ID or address?" For now the uploader and the manual paths are the only routes.
+### Step 1.5 — Future: VaultRE pull
+
+When the VaultRE integration is wired in (see ROADMAP.md and integrations/vaultre/ANALYSIS.md), offer a third path: "I can pull the photos straight from VaultRE — what is the property's reference ID or address?" For now the chat upload and the manual fallback are the only routes.
 
 ## Phase 2 — Analyse and brief
 
