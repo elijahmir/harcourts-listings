@@ -310,6 +310,25 @@ async def chat_ws(websocket: WebSocket) -> None:
                                     "(%d chars) for session=%s",
                                     len(assistant_text), session_id,
                                 )
+                                # Emit the recovered text as a synthetic chunk
+                                # so the frontend's live assistant bubble
+                                # actually shows the reply. Without this, the
+                                # text gets persisted to SQLite but the UI's
+                                # in-memory message stays empty (no text_delta
+                                # events fired during the stream) — user sees
+                                # a forever-stuck "Still working" placeholder
+                                # even though the turn completed. The frontend
+                                # chunk handler treats text_full as
+                                # latest-wins, so this exact-once emission is
+                                # the canonical fix.
+                                await _safe_send(
+                                    {
+                                        "type": "chunk",
+                                        "kind": "text_full",
+                                        "text": assistant_text,
+                                        "session_id": ev.session_id,
+                                    }
+                                )
                             else:
                                 log.warning(
                                     "assistant_text empty after stream + jsonl "
