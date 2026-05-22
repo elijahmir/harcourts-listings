@@ -18,7 +18,7 @@ Edit `.env.local` if your backend isn't on `http://127.0.0.1:3000`.
 npm run dev
 ```
 
-Opens at [http://localhost:3001](http://localhost:3001).
+Opens at [http://localhost:3010](http://localhost:3010).
 
 The backend must also be running (`services/backend/scripts/dev.sh` in another terminal).
 

@@ -6,7 +6,7 @@ The Claude work is done by spawning the local `claude` CLI as a subprocess, whic
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.11+ (newer `str | None` style annotations are used). Note: macOS ships with `/usr/bin/python3` at 3.9; install a newer Python via Homebrew (`brew install python@3.12`).
 - `claude` CLI on PATH, signed into the team's Claude Max account
 - The repo checked out so `consultants/`, `shared/`, and `outputs/` are siblings of `services/`
 
@@ -14,7 +14,8 @@ The Claude work is done by spawning the local `claude` CLI as a subprocess, whic
 
 ```bash
 cd services/backend
-python3 -m venv .venv
+# Use whichever 3.11+ binary you have — `python3.12` for a Homebrew install.
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
