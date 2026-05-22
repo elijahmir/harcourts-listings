@@ -207,8 +207,30 @@ export function useChat(opts: UseChatOptions): UseChatResult {
 
     connect();
 
+    // iOS Safari aggressively suspends the JS runtime when a tab is
+    // backgrounded — even briefly (screen dim, app switcher, lock).
+    // The WebSocket's `close` event may not fire until resume, and by
+    // then the auto-reconnect-on-close path is racing the user's first
+    // interaction. Pattern: when the tab becomes visible again, check
+    // the socket's readyState and force a reconnect if it isn't OPEN.
+    // This is the canonical fix for "WS works on desktop, dies on
+    // iPhone after a few seconds of inactivity."
+    const onVisible = () => {
+      if (cancelled) return;
+      if (document.visibilityState !== "visible") return;
+      const sock = wsRef.current;
+      if (!sock || sock.readyState === WebSocket.CLOSED ||
+          sock.readyState === WebSocket.CLOSING) {
+        attempt = 0; // user-initiated, give it a fresh budget
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        connect();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (ws) ws.close();
       wsRef.current = null;
