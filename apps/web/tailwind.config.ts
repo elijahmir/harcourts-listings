@@ -53,6 +53,34 @@ const config: Config = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      // Bind Tailwind Typography's prose CSS variables to our theme tokens
+      // so prose text inherits the same --foreground / --muted-foreground
+      // that flip with prefers-color-scheme in globals.css. This is the
+      // official `@tailwindcss/typography` extension point and overrides
+      // the plugin's own gray-700 default. Without this, body prose in
+      // dark mode was rgb(55,65,81) on rgb(39,39,42) — 1.45:1, unreadable.
+      typography: {
+        DEFAULT: {
+          css: {
+            "--tw-prose-body": "hsl(var(--foreground))",
+            "--tw-prose-headings": "hsl(var(--foreground))",
+            "--tw-prose-lead": "hsl(var(--muted-foreground))",
+            "--tw-prose-links": "hsl(var(--primary))",
+            "--tw-prose-bold": "hsl(var(--foreground))",
+            "--tw-prose-counters": "hsl(var(--muted-foreground))",
+            "--tw-prose-bullets": "hsl(var(--muted-foreground))",
+            "--tw-prose-hr": "hsl(var(--border))",
+            "--tw-prose-quotes": "hsl(var(--foreground))",
+            "--tw-prose-quote-borders": "hsl(var(--border))",
+            "--tw-prose-captions": "hsl(var(--muted-foreground))",
+            "--tw-prose-code": "hsl(var(--foreground))",
+            "--tw-prose-pre-code": "hsl(var(--foreground))",
+            "--tw-prose-pre-bg": "hsl(var(--background) / 0.6)",
+            "--tw-prose-th-borders": "hsl(var(--border))",
+            "--tw-prose-td-borders": "hsl(var(--border))",
+          },
+        },
+      },
     },
   },
   plugins: [typography],

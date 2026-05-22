@@ -22,11 +22,60 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 
+import json as _json
+from pathlib import Path as _Path
+
 from .config import get_settings
 from .db import get_db
 from .learnings import router as learnings_router
 from .runner import StreamEvent, StreamSummary, stream_message
 from .uploads import router as uploads_router
+
+
+def _recover_assistant_text_from_jsonl(claude_session_id: str) -> str:
+    """Last-resort recovery: read Claude Code's own session jsonl and
+    extract the most recent assistant message's text.
+
+    Claude Code persists every turn at ~/.claude/projects/<encoded>/{id}.jsonl.
+    Each line is a JSON event. The `--resume` flag points at this exact
+    file. If our stream-event parser misses the text for any reason, this
+    is the canonical source — guaranteed to match what Claude itself
+    "remembers" as having said.
+    """
+    matches = list(
+        (_Path.home() / ".claude" / "projects").glob(f"*/{claude_session_id}.jsonl")
+    )
+    if not matches:
+        return ""
+    # Walk lines bottom-up looking for the most recent assistant text.
+    try:
+        lines = matches[0].read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:  # noqa: BLE001
+        return ""
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            obj = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        # Claude Code's jsonl wraps events under a "message" key with role.
+        msg = obj.get("message") or obj
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            joined = "".join(text_parts).strip()
+            if joined:
+                return joined
+    return ""
 
 logging.basicConfig(
     level=logging.INFO,
@@ -238,6 +287,30 @@ async def chat_ws(websocket: WebSocket) -> None:
                     claude_bin=settings.claude_bin,
                 ):
                     if isinstance(ev, StreamSummary):
+                        # Safety net: if no text-bearing event populated
+                        # assistant_text (e.g. an unusual stream-json shape
+                        # for image-heavy turns), fall back to reading
+                        # Claude Code's own session jsonl. That file is
+                        # what `--resume` reads next turn, so it's the
+                        # canonical source of truth.
+                        if not assistant_text.strip() and ev.session_id:
+                            assistant_text = (
+                                _recover_assistant_text_from_jsonl(ev.session_id)
+                                or assistant_text
+                            )
+                            if assistant_text.strip():
+                                log.info(
+                                    "recovered assistant text from claude jsonl "
+                                    "(%d chars) for session=%s",
+                                    len(assistant_text), session_id,
+                                )
+                            else:
+                                log.warning(
+                                    "assistant_text empty after stream + jsonl "
+                                    "fallback for session=%s claude=%s",
+                                    session_id, ev.session_id,
+                                )
+
                         # Persist the assistant turn + bump session totals
                         # UNCONDITIONALLY — WS state is irrelevant.
                         db.insert_message(
@@ -275,13 +348,17 @@ async def chat_ws(websocket: WebSocket) -> None:
                         break
 
                     assert isinstance(ev, StreamEvent)
-                    # text_full carries the canonical accumulated text;
-                    # text_delta is incremental and only used for the
-                    # on-screen typing effect.
-                    if ev.text and ev.kind == "text_full":
+                    # Latest text-bearing event wins. Claude Code's
+                    # stream-json emits cumulative text on each assistant
+                    # delta, with stop_reason flipping from None to a value
+                    # on the final event. The old logic ("first text_delta
+                    # only, then text_full overwrites") missed cases where
+                    # the final assistant event was a tool_result or had no
+                    # text block — leaving assistant_text empty even though
+                    # claude generated a full reply. SQLite then persisted
+                    # 0 chars and the UI showed a forever-stuck placeholder.
+                    if ev.text and ev.kind in ("text_delta", "text_full"):
                         assistant_text = ev.text
-                    elif ev.text and ev.kind == "text_delta" and not assistant_text:
-                        assistant_text = ev.text  # fallback if no text_full arrives
 
                     await _safe_send(
                         {

@@ -589,18 +589,23 @@ function MessageBubble({
             ) : (
               <div
                 className={cn(
-                  "prose prose-sm max-w-none dark:prose-invert",
+                  // prose colors come from our --tw-prose-* CSS variable
+                  // mapping in globals.css (which uses the theme's
+                  // --foreground). That's why we DON'T need dark:prose-invert
+                  // — prose is theme-aware via CSS variables, not the
+                  // Tailwind dark: variant.
+                  "prose prose-sm max-w-none",
                   // Tighten the prose for a chat bubble — kill outer spacing
                   // and trim heading sizes so they don't shout.
                   "prose-p:my-2 prose-p:leading-relaxed",
                   "prose-headings:mt-3 prose-headings:mb-1.5 prose-headings:font-semibold",
                   "prose-h1:text-base prose-h2:text-base prose-h3:text-sm",
                   "prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5",
-                  "prose-pre:my-2 prose-pre:bg-background/60 prose-pre:rounded-md",
+                  "prose-pre:my-2 prose-pre:rounded-md",
                   "prose-code:before:hidden prose-code:after:hidden",
                   "prose-code:bg-background/60 prose-code:px-1.5 prose-code:py-0.5",
                   "prose-code:rounded-sm prose-code:font-normal",
-                  "prose-a:text-primary prose-a:underline-offset-2",
+                  "prose-a:underline-offset-2",
                   "first:[&>*]:mt-0 last:[&>*]:mb-0",
                 )}
               >

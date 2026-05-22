@@ -75,4 +75,9 @@
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
   }
+
+  /* Prose color overrides live in tailwind.config.ts under
+   * theme.extend.typography.DEFAULT.css — that's the only place
+   * Tailwind Typography's --tw-prose-* variables can be overridden
+   * with the right cascade priority. Don't try to set them here. */
 }
