@@ -1,0 +1,57 @@
+"""Runtime configuration for the backend.
+
+Resolved from env vars at import time. Paths fall back to the repo layout
+so a fresh checkout runs without configuration.
+"""
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+from pathlib import Path
+
+# This file lives at services/backend/app/config.py — repo root is three levels up.
+_HERE = Path(__file__).resolve().parent
+_DEFAULT_PROJECT_ROOT = _HERE.parent.parent.parent
+
+
+class Settings:
+    """Lazy-loaded settings. Use get_settings() to access."""
+
+    def __init__(self) -> None:
+        self.project_root: Path = Path(
+            os.environ.get("HARCOURTS_PROJECT_ROOT", str(_DEFAULT_PROJECT_ROOT))
+        ).resolve()
+        self.consultants_dir: Path = self.project_root / "consultants"
+        self.host: str = os.environ.get("HARCOURTS_BACKEND_HOST", "127.0.0.1")
+        self.port: int = int(os.environ.get("HARCOURTS_BACKEND_PORT", "3000"))
+        # Path to the `claude` CLI binary. PATH lookup by default; override if
+        # the office Mac uses a non-standard install location.
+        self.claude_bin: str = os.environ.get("HARCOURTS_CLAUDE_BIN", "claude")
+
+    def consultant_folder(self, slug: str) -> Path:
+        """Return the on-disk folder for a consultant slug, or raise if missing.
+
+        The slug must match a directory in consultants/ — we don't auto-create.
+        """
+        folder = (self.consultants_dir / slug).resolve()
+        # Path-traversal guard: the resolved folder must sit inside consultants_dir.
+        if self.consultants_dir.resolve() not in folder.parents:
+            raise ValueError(f"slug escapes consultants directory: {slug!r}")
+        if not folder.is_dir():
+            raise FileNotFoundError(f"no consultant folder for slug: {slug!r}")
+        return folder
+
+    def known_consultants(self) -> list[str]:
+        """Slugs of every consultant folder on disk (excluding _template and dotfiles)."""
+        if not self.consultants_dir.is_dir():
+            return []
+        return sorted(
+            p.name
+            for p in self.consultants_dir.iterdir()
+            if p.is_dir() and not p.name.startswith((".", "_"))
+        )
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
