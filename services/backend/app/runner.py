@@ -24,6 +24,27 @@ from typing import Any, AsyncIterator
 log = logging.getLogger(__name__)
 
 
+def _chat_ui_context(consultant_slug: str) -> str:
+    """System-prompt override telling Claude the chat UI has already handled
+    consultant selection. Prevents the root CLAUDE.md's master greeting from
+    firing on every first turn."""
+    return (
+        "You're being invoked from the team's browser chat UI, not the "
+        "terminal launcher. The user has already chosen the consultant "
+        f"'{consultant_slug}' from a dropdown and given their name; treat "
+        "that as a settled fact. Do NOT run the root CLAUDE.md greeting "
+        "flow that asks 'Hi! Which Property Sales Consultant is this "
+        "listing for?' and lists all seven consultants — that flow only "
+        "applies to terminal-launched sessions and does not apply here. "
+        f"Operate directly as {consultant_slug} per "
+        f"consultants/{consultant_slug}/CLAUDE.md and respond to the "
+        "user's message. If their first message is a casual greeting "
+        "like 'hi', respond briefly in this consultant's voice — don't "
+        "kick straight into Phase 1 of the workflow until they actually "
+        "ask for a listing."
+    )
+
+
 @dataclass
 class StreamEvent:
     """A single parsed event off claude's stream-json stdout."""
@@ -81,6 +102,11 @@ async def stream_message(
         "--verbose",
         "--add-dir", str(consultant_folder),
         "--permission-mode", "acceptEdits",
+        # Tell Claude the chat UI already did consultant selection, so it
+        # skips the master CLAUDE.md greeting that asks the user to pick
+        # one of seven consultants. Without this the first turn is always
+        # noise.
+        "--append-system-prompt", _chat_ui_context(consultant_folder.name),
     ]
     if resume_session_id:
         args.extend(["--resume", resume_session_id])
