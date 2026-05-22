@@ -472,12 +472,10 @@ function MessageBubble({
               <Dot delay={300} />
             </span>
           )}
-          {!isUser && message.meta?.costUsd != null && message.meta.costUsd > 0 && (
-            <div className="mt-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-              {message.meta.tokensIn ?? 0} in · {message.meta.tokensOut ?? 0} out
-              · ${message.meta.costUsd.toFixed(4)}
-            </div>
-          )}
+          {/* Token / cost metadata is intentionally hidden — your team is on
+              the Claude Max subscription, so the per-turn dollar figure is
+              misleading. Raw counts are still persisted in SQLite for
+              diagnostics. */}
         </div>
 
         {canSave && !editing && !saved && (

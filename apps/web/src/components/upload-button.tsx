@@ -19,7 +19,9 @@ export function UploadButton({ disabled, onFiles }: UploadButtonProps) {
         ref={inputRef}
         type="file"
         multiple
-        accept="image/*,.heic,.heif,application/pdf"
+        // No `accept` filter — the backend takes anything (photos, floor
+        // plans, .docx drafts, contracts, notes). Backend classifies into
+        // photo / floorplan / pdf / other for display.
         className="hidden"
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
