@@ -7,22 +7,36 @@ import { NamePrompt } from "@/components/name-prompt";
 import { getUserName, setUserName } from "@/lib/storage";
 
 /**
- * Resolve the backend URL at runtime.
+ * Resolve the backend URL at runtime — handles three deployment shapes.
  *
- * Default: same host as the browser, port 3000. So opening the app on
- * the Mac at http://localhost:3010 connects to http://localhost:3000;
- * opening it on a phone at http://192.168.1.53:3010 connects to
- * http://192.168.1.53:3000. No env var needed.
+ * 1. Dev on this Mac: browser at http://localhost:3010 → backend at
+ *    http://localhost:3000 (different port, frontend and backend
+ *    served independently).
+ * 2. LAN / tailnet direct: browser at http://my-mac.tail-xxx.ts.net:3010
+ *    → backend at http://my-mac.tail-xxx.ts.net:3000. Same shape as dev.
+ * 3. Production via Tailscale Funnel (or any reverse proxy): browser
+ *    at https://my-mac.tail-xxx.ts.net (no explicit port). The proxy
+ *    in front routes / to the frontend and /api, /healthz, /ws to the
+ *    backend. From the browser's perspective everything is same-origin.
  *
- * Override via NEXT_PUBLIC_BACKEND_URL only if the backend is on a
- * different host (e.g. behind a Tailscale Funnel proxy).
+ * Detection rule: if window.location has an explicit port, we're in case
+ * 1 or 2, append :3000. If not, we're in case 3 (Funnel), use same-origin.
+ *
+ * NEXT_PUBLIC_BACKEND_URL overrides this entire derivation if set —
+ * useful for unusual setups (e.g. backend on a different host).
  */
 function resolveBackendUrl(): string {
   if (process.env.NEXT_PUBLIC_BACKEND_URL) {
     return process.env.NEXT_PUBLIC_BACKEND_URL;
   }
   if (typeof window !== "undefined") {
-    return `${window.location.protocol}//${window.location.hostname}:3000`;
+    const { protocol, hostname, port } = window.location;
+    if (!port) {
+      // Funnel / reverse proxy: same origin handles everything.
+      return `${protocol}//${hostname}`;
+    }
+    // Dev or LAN direct: backend lives on the same host, port 3000.
+    return `${protocol}//${hostname}:3000`;
   }
   return "http://127.0.0.1:3000"; // SSR fallback; never actually hit
 }

@@ -2,7 +2,7 @@
 
 End-to-end setup for a fresh Mac. Designed so a human OR a Claude Code agent reading this file can complete the whole thing top-to-bottom without external context. Every step lists the exact command, the expected outcome, and what to do if it doesn't.
 
-> **TL;DR for someone who's done this before:** `git clone`, `./scripts/install.sh`, `claude login`, paste four lines into `.claude/settings.json`, `./scripts/install.sh verify`, `./scripts/install.sh launchd`, optional Tailscale, done.
+> **TL;DR for someone who's done this before:** `git clone`, `./scripts/install.sh`, `claude login`, paste four lines into `.claude/settings.json`, `./scripts/install.sh verify`, `./scripts/install.sh launchd`, `tailscale up`, `./scripts/install.sh funnel`, done. Teammates use the public HTTPS URL — no install on their devices.
 
 ---
 
@@ -192,34 +192,87 @@ Restart the backend so it picks up new env values:
 
 ---
 
-## 9. Remote access via Tailscale Funnel (so teammates' phones can reach the chat)
+## 9. Publish to teammates — Tailscale Funnel (required for production)
 
-Without Tailscale: only devices on the office Wi-Fi can hit `http://192.168.x.x:3010`. To let teammates connect from anywhere:
+This is what teammates actually use. The Funnel URL is public HTTPS (Tailscale handles certificates) and **requires nothing installed on their phones/laptops** — they just open the URL in a browser. Anyone who has the URL can use the chat; trust is bounded by URL secrecy + the `.claude/settings.json` deny list.
+
+### 9a. Install Tailscale CLI on the host Mac
+
+Pick one:
 
 ```bash
+# Option A — brew (preferred if you don't already have the App Store version)
 brew install tailscale
 sudo brew services start tailscale
-tailscale up           # opens a browser for first-time auth
-tailscale funnel 3010  # exposes :3010 as https://harcourts-mac.tail-xxxxxx.ts.net
+
+# Option B — if you already have the App Store Tailscale GUI running, expose its CLI:
+sudo ln -sf /Applications/Tailscale.app/Contents/MacOS/Tailscale /usr/local/bin/tailscale
 ```
 
-The funnel URL is public HTTPS (Tailscale handles certificates). Anyone with that URL can open the chat — that's intentional and matches the original "Tailscale perimeter = trust boundary" design. The chat itself has no per-user authentication; identity is captured by the "what's your name?" prompt on first visit.
+Then sign in once:
 
-To stop publishing the funnel: `tailscale funnel reset`.
+```bash
+tailscale up   # opens a browser, sign in with the team's Tailscale account
+```
+
+You also need to **enable Funnel for your tailnet** once in the admin console:
+1. Visit <https://login.tailscale.com/admin/dns>
+2. Toggle "Funnel" / "HTTPS Certificates" on
+3. (Per-machine enablement happens automatically when `install.sh funnel` runs)
+
+### 9b. One command to publish
+
+```bash
+./scripts/install.sh funnel
+```
+
+What it does (so you can debug if it fails):
+
+1. Verifies `tailscale` is on PATH and logged in.
+2. Resets any previous `tailscale serve` / `tailscale funnel` state.
+3. Sets up path-based routing through one HTTPS endpoint:
+   | Path | Backend |
+   |---|---|
+   | `/` | Next.js frontend on `127.0.0.1:3010` |
+   | `/api/*` | FastAPI on `127.0.0.1:3000` |
+   | `/healthz` | FastAPI on `127.0.0.1:3000` |
+   | `/ws/*` | FastAPI WebSocket on `127.0.0.1:3000` |
+4. Enables `tailscale funnel` on port 443.
+5. Prints the public URL (e.g. `https://your-mac.tail-xxxxxx.ts.net`).
+
+### 9c. Why this works for both backend AND frontend on one URL
+
+The frontend's runtime URL-derive (in `apps/web/src/app/page.tsx`) detects when the browser is on an explicit port (3010 → dev/LAN mode → talk to `:3000`) vs. no port (Funnel URL on port 443 → same-origin mode → talk to the proxy in front). Tailscale Serve routes paths to the right backend. Browsers see one origin; CORS is irrelevant.
+
+### 9d. To stop publishing
+
+```bash
+./scripts/install.sh funnel-off
+```
+
+Reverts to "only the office tailnet can reach the Mac". Useful when troubleshooting or taking the service down for maintenance.
 
 ---
 
 ## 10. Smoke test the whole stack
 
-From the host Mac (or any device on the funnel URL):
+From any device, any network, on the public Funnel URL printed by step 9b:
 
-1. Open `http://localhost:3010` (or the funnel URL).
+1. Open `https://<your-mac>.tail-xxxxxx.ts.net` (in Safari on your phone over cellular is the strongest test — that's exactly what teammates will do).
 2. Enter your name when prompted — saved to `localStorage` once.
 3. Pick a consultant from the dropdown. The list comes from the on-disk `consultants/` folder.
 4. Send "hi" — Wendy (or whoever is selected) should greet you in her voice (not the old "Hi! Which Property Sales Consultant…" master greeting).
 5. Click 📎, pick a small file, send a message — your bubble should show the attachment header.
 6. Click "History" in the header — should list past sessions for the selected consultant.
 7. Click "New" — fresh chat; the previous session is preserved in History.
+
+Also confirm with curl from anywhere:
+
+```bash
+curl -s https://<your-mac>.tail-xxxxxx.ts.net/healthz | python3 -m json.tool
+```
+
+Should print the consultant list and `"ok": true`.
 
 If any step fails, check the relevant log:
 
@@ -230,6 +283,9 @@ If any step fails, check the relevant log:
 | Wendy says "I need permission to…" | Confirm step 5 (the four Bash entries) is done |
 | Wendy greets with all seven consultant names | The `--append-system-prompt` override wasn't picked up; restart with `./scripts/install.sh restart` |
 | File appeared in `photos/` but Wendy didn't acknowledge | The `📎 Attached` header is in the user message — confirm it's visible in the user's bubble before her reply |
+| Funnel URL gives 404 on `/api/...` or `/ws/...` | Path routing isn't set. Re-run `./scripts/install.sh funnel`. If still broken, `tailscale serve status` shows current routes. |
+| Funnel URL connects but chat WS shows red dot | Tailscale Serve's WebSocket support — check `tailscale version` is 1.50 or newer. Upgrade via `brew upgrade tailscale`. |
+| `./scripts/install.sh funnel` says "Funnel needs to be enabled for this account" | Visit <https://login.tailscale.com/admin/dns> and toggle Funnel on. |
 
 ---
 
@@ -280,13 +336,24 @@ The repo and `data/` are untouched — delete those manually if you want a full 
 
 ## For a Claude agent reading this autonomously
 
-If you've been asked to set up this system on a fresh Mac:
+If you've been asked to set up this system on a fresh Mac, follow these steps in order. Stop at each point that requires the human and ask before proceeding.
 
 1. Confirm you're at the project root: `pwd` should end in `harcourts-listings`.
-2. Run `./scripts/install.sh check` — read the output, install any RED prereqs via the suggested `brew install` lines.
-3. Run `./scripts/install.sh` — wait for it to finish (1–3 minutes).
-4. Tell the user: "I've finished the scripted bootstrap. Three things need a human: (a) run `claude login` to sign in, (b) edit `.claude/settings.json` to add four Bash patterns — I'll paste them — (c) decide whether to install launchd auto-start and/or Tailscale Funnel."
-5. Paste the four `Bash(...)` lines from step 5 above. Wait for confirmation.
-6. **Definitive check:** run `./scripts/install.sh verify`. If it prints `✓ claude responded cleanly. This Mac is ready.`, the permission chain is complete and every teammate's chat will work the same way. If it fails, follow the printed remedies and re-run.
-7. After verify passes, run `./scripts/install.sh launchd` if the user wants auto-start.
-8. Run the smoke-test commands from step 10 and report results.
+2. Run `./scripts/install.sh check`. Install any RED prereqs via the suggested `brew install` lines. If `tailscale` is missing, suggest installing it now (Funnel is required for production).
+3. Run `./scripts/install.sh`. Wait for it to finish (1–3 minutes).
+4. **Ask the human to do these three:**
+   - `claude login` (signs into the Anthropic Max account)
+   - `tailscale up` (signs into the team's Tailscale account)
+   - paste these four lines into `.claude/settings.json`'s `permissions.allow` array — read them out:
+     ```json
+     "Bash(mv ./consultants/**)",
+     "Bash(cp ./consultants/**)",
+     "Bash(ls ./consultants/**)",
+     "Bash(cat ./consultants/**)"
+     ```
+   Wait for confirmation that all three are done.
+5. **Definitive permissions check:** run `./scripts/install.sh verify`. Must print `✓ claude responded cleanly. This Mac is ready.` If it fails, follow the printed remedies and re-run.
+6. **Auto-start on boot:** run `./scripts/install.sh launchd`. Verify both services come up with `curl -s http://127.0.0.1:3000/healthz` and `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3010/`.
+7. **Publish to teammates:** run `./scripts/install.sh funnel`. The script prints the public HTTPS URL (e.g. `https://your-mac.tail-xxxxxx.ts.net`). If the script fails because Funnel isn't enabled for the tailnet, ask the human to visit <https://login.tailscale.com/admin/dns> and toggle Funnel on, then re-run.
+8. **Smoke test from outside:** run `curl -s https://<funnel-url>/healthz`. Must return JSON with `"ok": true` and the consultant list. Then ask the human to open the URL on their phone over cellular (Wi-Fi off) and confirm the chat works.
+9. **Hand off:** report the public URL, confirm it's been smoke-tested, and tell the human to share it only with the trusted team.

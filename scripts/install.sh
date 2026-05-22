@@ -8,6 +8,8 @@
 #   ./scripts/install.sh check       # just report state, change nothing
 #   ./scripts/install.sh verify      # spawn claude --print, confirm permissions
 #   ./scripts/install.sh launchd     # install both launchd services
+#   ./scripts/install.sh funnel      # configure Tailscale Serve + Funnel (public HTTPS URL)
+#   ./scripts/install.sh funnel-off  # tear down Tailscale Serve + Funnel
 #   ./scripts/install.sh restart     # reload launchd services
 #   ./scripts/install.sh uninstall   # stop services + remove plists
 #
@@ -314,6 +316,133 @@ cmd_uninstall() {
   note  "  (the repo and data/ are untouched — delete those manually if needed)"
 }
 
+# --- Tailscale Funnel ------------------------------------------------------
+# Tailscale Funnel exposes ONE entry point publicly over HTTPS. Our stack has
+# two ports (frontend on 3010, backend on 3000), so we use Tailscale Serve
+# with path-based routing to fan out behind that single entry point:
+#
+#   /          → frontend (3010)
+#   /api/*     → backend  (3000)
+#   /healthz   → backend  (3000)
+#   /ws/*      → backend  (3000)  ← WebSocket; Tailscale proxies HTTP/1.1 Upgrade
+#
+# The Tailscale CLI syntax has shifted across versions (1.48 → 1.56+). This
+# script targets the modern `tailscale serve --bg --set-path` form. If your
+# Tailscale is older, the commands print here as a manual reference.
+
+resolve_tailscale_cli() {
+  # Prefer brew-installed CLI, then App Store version's bundled binary.
+  if command -v tailscale >/dev/null 2>&1; then
+    echo "tailscale"; return 0
+  fi
+  if [[ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]]; then
+    echo "/Applications/Tailscale.app/Contents/MacOS/Tailscale"; return 0
+  fi
+  return 1
+}
+
+cmd_funnel() {
+  hdr "Tailscale Funnel — public HTTPS URL"
+
+  local TS
+  if ! TS="$(resolve_tailscale_cli)"; then
+    red "  tailscale CLI not found."
+    note "  Options to install:"
+    note "    A. brew install tailscale && sudo brew services start tailscale"
+    note "    B. If you have the App Store Tailscale GUI, expose the CLI:"
+    note "         sudo ln -sf /Applications/Tailscale.app/Contents/MacOS/Tailscale \\"
+    note "             /usr/local/bin/tailscale"
+    return 1
+  fi
+  green "  tailscale CLI: $TS ($("$TS" version 2>&1 | head -1))"
+
+  # Confirm tailscale is logged in.
+  if ! "$TS" status >/dev/null 2>&1; then
+    red "  not logged into Tailscale on this Mac."
+    note "  Run:  $TS up"
+    note "  (a browser opens, sign in to your team's Tailscale account, then re-run this command.)"
+    return 1
+  fi
+  local TAILNET_NAME
+  TAILNET_NAME="$("$TS" status --self --json 2>/dev/null \
+                | python3 -c "import sys, json; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" \
+                2>/dev/null || true)"
+  if [[ -z "$TAILNET_NAME" ]]; then
+    yellow "  could not auto-detect this Mac's tailnet hostname."
+    note   "  Run \`$TS status\` manually to confirm Tailscale is up."
+  else
+    green "  tailnet hostname: $TAILNET_NAME"
+  fi
+
+  # Wipe any existing serve/funnel state so this is idempotent.
+  note "tearing down any previous tailscale serve/funnel config…"
+  "$TS" serve reset 2>/dev/null || "$TS" serve --bg off 2>/dev/null || true
+  "$TS" funnel reset 2>/dev/null || "$TS" funnel --bg off 2>/dev/null || true
+
+  # Configure path-based routing. The syntax `tailscale serve --bg --set-path=<path> proxy <port>`
+  # works on 1.50+. If your tailscale is older, see the docs at
+  # https://tailscale.com/kb/1311/tailscale-serve.
+  hdr "Configuring Tailscale Serve (path → port routing)"
+  set +e
+  "$TS" serve --bg --set-path=/        proxy 3010
+  "$TS" serve --bg --set-path=/api     proxy 3000
+  "$TS" serve --bg --set-path=/healthz proxy 3000
+  "$TS" serve --bg --set-path=/ws      proxy 3000
+  set -e
+
+  # Enable Funnel for public access.
+  hdr "Enabling Funnel (publishing to the internet)"
+  set +e
+  "$TS" funnel --bg 443
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    red "  funnel command failed (exit $rc)."
+    note "  Common causes:"
+    note "  1. Funnel needs to be enabled for this account in the Tailscale admin console."
+    note "     Visit: https://login.tailscale.com/admin/dns and enable Funnel."
+    note "  2. CLI syntax differs in your version. Try \`$TS funnel --help\`."
+    return 1
+  fi
+
+  green "  Funnel enabled."
+
+  echo
+  if [[ -n "$TAILNET_NAME" ]]; then
+    cat <<EOF
+============================================================
+  PUBLIC URL: https://${TAILNET_NAME}
+============================================================
+
+Share that URL with teammates. Their phones / laptops do NOT need
+Tailscale installed. Any device on any network can reach it.
+
+Quick test:
+   curl -sI https://${TAILNET_NAME} | head -1            # → HTTP/2 200
+   curl -s https://${TAILNET_NAME}/healthz               # → JSON with consultants
+EOF
+  else
+    cat <<EOF
+============================================================
+  Funnel is up — check the URL with:
+      $TS serve status
+============================================================
+EOF
+  fi
+}
+
+cmd_funnel_off() {
+  hdr "Tailscale Funnel — tear down"
+  local TS
+  if ! TS="$(resolve_tailscale_cli)"; then
+    red "  tailscale CLI not found, nothing to do."
+    return 0
+  fi
+  "$TS" funnel reset 2>/dev/null || "$TS" funnel --bg off 2>/dev/null || true
+  "$TS" serve  reset 2>/dev/null || "$TS" serve  --bg off 2>/dev/null || true
+  green "  Funnel and Serve configurations cleared."
+}
+
 # --- verify ---------------------------------------------------------------
 # Spawns `claude --print` with the exact flags services/backend/app/runner.py
 # uses, sends a one-word prompt, and confirms the response is sane. This is
@@ -419,16 +548,24 @@ print_next_steps() {
    If this passes, every teammate's chat works the same way (the system
    is per-host, not per-user — see docs/HOST-SETUP.md#trust-model).
 
-4. Auto-start the services on boot (optional but recommended):
+4. Auto-start the services on boot:
 
        ./scripts/install.sh launchd
 
-For remote access from teammates' phones, see docs/HOST-SETUP.md
-(Tailscale Funnel section).
+5. Publish a public HTTPS URL for teammates (Tailscale Funnel — required
+   for production; teammates need NO install on their devices):
 
-Smoke test the running services:
+       ./scripts/install.sh funnel
+
+   Prereq: \`tailscale\` CLI is installed AND logged in. If the command
+   prints an install/login hint, follow it and re-run.
+
+Smoke test locally first:
    curl -s http://127.0.0.1:3000/healthz | python3 -m json.tool
    open http://127.0.0.1:3010
+
+Then over the public URL (after funnel is up):
+   curl -s https://<your-mac>.tail-xxxxxx.ts.net/healthz
 
 NEXT
 }
@@ -438,11 +575,13 @@ NEXT
 main() {
   local sub="${1:-install}"
   case "$sub" in
-    check)     cmd_check ;;
-    verify)    cmd_verify ;;
-    launchd)   cmd_launchd ;;
-    restart)   cmd_restart ;;
-    uninstall) cmd_uninstall ;;
+    check)      cmd_check ;;
+    verify)     cmd_verify ;;
+    launchd)    cmd_launchd ;;
+    funnel)     cmd_funnel ;;
+    funnel-off) cmd_funnel_off ;;
+    restart)    cmd_restart ;;
+    uninstall)  cmd_uninstall ;;
     install|"")
       cmd_check
       require_macos
@@ -454,7 +593,7 @@ main() {
       ;;
     *)
       red "Unknown subcommand: $sub"
-      echo "Usage: $0 [check|install|verify|launchd|restart|uninstall]"
+      echo "Usage: $0 [check|install|verify|launchd|funnel|funnel-off|restart|uninstall]"
       exit 1
       ;;
   esac
