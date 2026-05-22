@@ -93,6 +93,15 @@ async def stream_message(
     Yields zero or more :class:`StreamEvent`s followed by exactly one
     :class:`StreamSummary` once the subprocess exits.
     """
+    # The consultant folder is the *only* directory Claude can write
+    # freely. Shared rules and the outputs/ tree are also needed at
+    # read/write time — `shared/` for the workflow/security/writing
+    # rule docs, `outputs/` for the Phase 5 Word document. The deny
+    # rules in .claude/settings.json still block edits to shared/.
+    project_root = consultant_folder.parent.parent
+    shared_dir = project_root / "shared"
+    outputs_dir = project_root / "outputs"
+
     args = [
         claude_bin,
         "--print",
@@ -101,6 +110,8 @@ async def stream_message(
         "--include-partial-messages",
         "--verbose",
         "--add-dir", str(consultant_folder),
+        "--add-dir", str(shared_dir),
+        "--add-dir", str(outputs_dir),
         "--permission-mode", "acceptEdits",
         # Tell Claude the chat UI already did consultant selection, so it
         # skips the master CLAUDE.md greeting that asks the user to pick
