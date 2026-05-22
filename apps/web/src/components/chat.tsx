@@ -2,6 +2,8 @@
 
 import { BookmarkPlus, RefreshCcw, Send, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { SaveLearningForm } from "@/components/save-learning-form";
 import { Button } from "@/components/ui/button";
@@ -53,6 +55,11 @@ export function Chat({ userName, backendUrl }: ChatProps) {
   const [editingLearningForId, setEditingLearningForId] = useState<string | null>(
     null,
   );
+  // Tracks the SQLite session id for THIS consultant. Comes from localStorage
+  // on consultant change, gets overwritten when the backend confirms one via
+  // the `done` event. We hold it in state (not useMemo) so the UploadButton
+  // re-renders the instant the first turn finishes.
+  const [sessionId, setSessionIdState] = useState<string | null>(null);
 
   // Load consultant list + restore last selection on first mount.
   useEffect(() => {
@@ -66,7 +73,9 @@ export function Chat({ userName, backendUrl }: ChatProps) {
         const initial = saved && list.includes(saved) ? saved : list[0] ?? null;
         setSlug(initial);
         if (initial) {
-          setInitialSessionId(getSessionId(initial));
+          const sid = getSessionId(initial);
+          setInitialSessionId(sid);
+          setSessionIdState(sid);
           setInitialClaudeSessionId(getClaudeSessionId(initial));
         }
       } catch {
@@ -78,14 +87,17 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     };
   }, [backendUrl]);
 
-  const { messages, status, isStreaming, send, reset } = useChat({
+  const { messages, status, isStreaming, send, reset, reconnect } = useChat({
     backendUrl,
     consultantSlug: slug,
     userName,
     initialSessionId,
     initialClaudeSessionId,
     onSessionIdChange: (id) => {
-      if (slug) setSessionId(slug, id);
+      if (slug) {
+        setSessionId(slug, id);
+        setSessionIdState(id);
+      }
     },
     onClaudeSessionIdChange: (id) => {
       if (slug) setClaudeSessionId(slug, id);
@@ -98,20 +110,13 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // The session_id we hold for THIS consultant. Read from localStorage on
-  // every render so the upload button can react when the first turn lands.
-  const sessionId = useMemo(
-    () => (slug ? getSessionId(slug) : null),
-    // Reread when messages change (proxy for "a turn just finished").
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [slug, messages.length],
-  );
-
   function pickConsultant(next: string) {
     if (!next || next === slug) return;
     setSlug(next);
     setConsultantSlug(next);
-    setInitialSessionId(getSessionId(next));
+    const sid = getSessionId(next);
+    setInitialSessionId(sid);
+    setSessionIdState(sid);
     setInitialClaudeSessionId(getClaudeSessionId(next));
     setUploads([]);
     setSavedLearningMessageIds(new Set());
@@ -124,6 +129,7 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     setSessionId(slug, null);
     setClaudeSessionId(slug, null);
     setInitialSessionId(null);
+    setSessionIdState(null);
     setInitialClaudeSessionId(null);
     setUploads([]);
     setSavedLearningMessageIds(new Set());
@@ -198,6 +204,7 @@ export function Chat({ userName, backendUrl }: ChatProps) {
         onPickConsultant={pickConsultant}
         status={status}
         onNewConversation={startNewConversation}
+        onReconnect={reconnect}
       />
 
       <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pb-44">
@@ -295,6 +302,7 @@ interface HeaderProps {
   onPickConsultant: (slug: string) => void;
   status: ConnectionStatus;
   onNewConversation: () => void;
+  onReconnect: () => void;
 }
 
 function Header({
@@ -304,6 +312,7 @@ function Header({
   onPickConsultant,
   status,
   onNewConversation,
+  onReconnect,
 }: HeaderProps) {
   return (
     <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
@@ -339,7 +348,19 @@ function Header({
         </Button>
 
         <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-          <StatusDot status={status} />
+          {(status === "closed" || status === "error") ? (
+            <button
+              type="button"
+              onClick={onReconnect}
+              className="inline-flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-rose-600 hover:bg-rose-500/20 dark:text-rose-400"
+              title="The backend connection dropped. Click to retry."
+            >
+              <span className="h-2 w-2 rounded-full bg-rose-500" />
+              Reconnect
+            </button>
+          ) : (
+            <StatusDot status={status} />
+          )}
           <span>{userName}</span>
         </div>
       </div>
@@ -412,13 +433,39 @@ function MessageBubble({
       <div className={cn("flex max-w-[85%] flex-col", isUser && "items-end")}>
         <div
           className={cn(
-            "whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-relaxed",
+            "rounded-2xl px-4 py-3 text-sm leading-relaxed",
             isUser
-              ? "bg-primary text-primary-foreground"
+              ? "whitespace-pre-wrap bg-primary text-primary-foreground"
               : "bg-muted text-foreground",
           )}
         >
-          {message.text || (
+          {message.text ? (
+            isUser ? (
+              message.text
+            ) : (
+              <div
+                className={cn(
+                  "prose prose-sm max-w-none dark:prose-invert",
+                  // Tighten the prose for a chat bubble — kill outer spacing
+                  // and trim heading sizes so they don't shout.
+                  "prose-p:my-2 prose-p:leading-relaxed",
+                  "prose-headings:mt-3 prose-headings:mb-1.5 prose-headings:font-semibold",
+                  "prose-h1:text-base prose-h2:text-base prose-h3:text-sm",
+                  "prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5",
+                  "prose-pre:my-2 prose-pre:bg-background/60 prose-pre:rounded-md",
+                  "prose-code:before:hidden prose-code:after:hidden",
+                  "prose-code:bg-background/60 prose-code:px-1.5 prose-code:py-0.5",
+                  "prose-code:rounded-sm prose-code:font-normal",
+                  "prose-a:text-primary prose-a:underline-offset-2",
+                  "first:[&>*]:mt-0 last:[&>*]:mb-0",
+                )}
+              >
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {message.text}
+                </ReactMarkdown>
+              </div>
+            )
+          ) : (
             <span className="inline-flex gap-1">
               <Dot delay={0} />
               <Dot delay={150} />

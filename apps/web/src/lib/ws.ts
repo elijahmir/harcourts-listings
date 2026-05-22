@@ -89,6 +89,8 @@ interface UseChatResult {
   isStreaming: boolean;
   send: (args: SendArgs) => void;
   reset: () => void;
+  /** Force a fresh reconnect after a give-up. */
+  reconnect: () => void;
 }
 
 function makeId(): string {
@@ -114,43 +116,103 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   // Track the live assistant message ID so chunk events know what to append to.
   const liveAssistantIdRef = useRef<string | null>(null);
 
-  // Open / close the socket. Re-opens when the backend URL changes.
+  // The WS "message" listener is bound once when the socket opens, so its
+  // closure captures whatever `opts` looked like at that moment. The parent
+  // component's callbacks reference state that changes later (e.g. `slug`),
+  // so we keep them in a ref that we refresh on every render — the listener
+  // always calls the latest version. Without this, the first turn's `done`
+  // event invokes a stale callback whose `slug` is still null, and the
+  // session id never makes it back to the UI.
+  const optsRef = useRef(opts);
   useEffect(() => {
-    let cancelled = false;
-    setStatus("connecting");
-    const ws = new WebSocket(toWsUrl(opts.backendUrl));
-    wsRef.current = ws;
+    optsRef.current = opts;
+  });
 
-    ws.addEventListener("message", (event) => {
+  // Bumps every time someone calls reconnect() — triggers the effect below.
+  const [reconnectNonce, setReconnectNonce] = useState(0);
+  const reconnect = useCallback(() => setReconnectNonce((n) => n + 1), []);
+
+  // Open the socket, with auto-reconnect on unexpected close. Reconnects
+  // are essential because:
+  //   - React StrictMode in dev mounts → unmounts → re-mounts, which closes
+  //     the first WS before the handshake completes.
+  //   - Dev-server hot reload, sleeping macs, transient network drops.
+  //
+  // Backoff: 0, 500, 1000, 2000, 4000, 5000 ms. Resets on a successful
+  // "ready" frame. After MAX_ATTEMPTS straight failures we stop and surface
+  // the "closed" status so the UI can offer a manual Reconnect button —
+  // avoids spamming the console forever when something is hard-blocking
+  // the connection (e.g. a browser extension).
+  useEffect(() => {
+    if (!opts.backendUrl) return;
+
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+
+    const RETRY_DELAYS_MS = [0, 500, 1000, 2000, 4000, 5000];
+    const MAX_ATTEMPTS = 8;
+
+    const connect = () => {
       if (cancelled) return;
-      let frame: ServerFrame;
+      setStatus("connecting");
       try {
-        frame = JSON.parse(event.data) as ServerFrame;
-      } catch {
+        ws = new WebSocket(toWsUrl(opts.backendUrl));
+      } catch (err) {
+        console.error("invalid backend URL", opts.backendUrl, err);
+        setStatus("error");
         return;
       }
-      handleFrame(frame);
-    });
+      wsRef.current = ws;
 
-    ws.addEventListener("close", () => {
-      if (cancelled) return;
-      setStatus("closed");
-      setIsStreaming(false);
-    });
+      ws.addEventListener("message", (event) => {
+        if (cancelled) return;
+        let frame: ServerFrame;
+        try {
+          frame = JSON.parse(event.data) as ServerFrame;
+        } catch {
+          return;
+        }
+        if (frame.type === "ready") {
+          attempt = 0; // healthy handshake → reset backoff
+        }
+        handleFrame(frame);
+      });
 
-    ws.addEventListener("error", () => {
-      if (cancelled) return;
-      setStatus("error");
-      setIsStreaming(false);
-    });
+      ws.addEventListener("close", () => {
+        if (cancelled) return;
+        setStatus("closed");
+        setIsStreaming(false);
+        attempt += 1;
+        if (attempt >= MAX_ATTEMPTS) {
+          // Give up — user must click Reconnect.
+          return;
+        }
+        const delay =
+          RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+        reconnectTimer = setTimeout(connect, delay);
+      });
+
+      ws.addEventListener("error", () => {
+        if (cancelled) return;
+        setStatus("error");
+        setIsStreaming(false);
+        // 'error' fires immediately before 'close'; let 'close' schedule
+        // the retry to avoid double-booking.
+      });
+    };
+
+    connect();
 
     return () => {
       cancelled = true;
-      ws.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opts.backendUrl]);
+  }, [opts.backendUrl, reconnectNonce]);
 
   // Sync refs when the consultant changes.
   useEffect(() => {
@@ -206,11 +268,11 @@ export function useChat(opts: UseChatOptions): UseChatResult {
 
       if (frame.session_id && frame.session_id !== sessionIdRef.current) {
         sessionIdRef.current = frame.session_id;
-        opts.onSessionIdChange?.(frame.session_id);
+        optsRef.current.onSessionIdChange?.(frame.session_id);
       }
       if (frame.claude_session_id) {
         claudeSessionIdRef.current = frame.claude_session_id;
-        opts.onClaudeSessionIdChange?.(frame.claude_session_id);
+        optsRef.current.onClaudeSessionIdChange?.(frame.claude_session_id);
       }
       return;
     }
@@ -274,7 +336,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     setIsStreaming(false);
   }, []);
 
-  return { messages, status, isStreaming, send, reset };
+  return { messages, status, isStreaming, send, reset, reconnect };
 }
 
 // --- REST helpers ----------------------------------------------------------

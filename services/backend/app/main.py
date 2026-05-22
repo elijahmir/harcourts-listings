@@ -57,14 +57,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for the Next.js dev server. WebSocket handshakes aren't subject to
-# preflight, but the REST routes are.
+# CORS for the chat UI. We need to accept:
+#   - localhost / 127.0.0.1 (Mac browsing on the host itself)
+#   - RFC1918 private LAN IPs (phone/laptop on the same Wi-Fi)
+#   - Tailscale MagicDNS hostnames (teammates over the tailnet)
+# WebSocket handshakes aren't subject to CORS, but the /healthz fetch is.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3010",
-        "http://127.0.0.1:3010",
-    ],
+    allow_origin_regex=(
+        r"^https?://("
+        r"localhost"
+        r"|127\.0\.0\.1"
+        r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}"
+        r"|192\.168\.\d{1,3}\.\d{1,3}"
+        r"|[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net"
+        r")(:\d+)?$"
+    ),
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
