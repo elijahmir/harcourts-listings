@@ -1,0 +1,12 @@
+# Node / Next
+node_modules/
+.next/
+out/
+.env*.local
+
+# Next.js generated types
+next-env.d.ts
+
+# misc
+.DS_Store
+*.log
