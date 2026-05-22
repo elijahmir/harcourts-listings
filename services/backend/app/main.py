@@ -109,8 +109,13 @@ app = FastAPI(
 # CORS for the chat UI. We need to accept:
 #   - localhost / 127.0.0.1 (Mac browsing on the host itself)
 #   - RFC1918 private LAN IPs (phone/laptop on the same Wi-Fi)
-#   - Tailscale MagicDNS hostnames (teammates over the tailnet)
+#   - Tailscale CGNAT range 100.64.0.0/10 (teammates hitting the host's
+#     tailnet IP directly, e.g. http://100.89.167.17:3010 from an
+#     iPhone on cellular). The /10 means second octet is 64-127.
+#   - Tailscale MagicDNS hostnames (*.tail*.ts.net)
 # WebSocket handshakes aren't subject to CORS, but the /healthz fetch is.
+# Symptom of missing an origin here: WS connects (green dot) but the
+# consultant dropdown stays empty because fetchConsultants() is blocked.
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=(
@@ -120,6 +125,7 @@ app.add_middleware(
         r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
         r"|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}"
         r"|192\.168\.\d{1,3}\.\d{1,3}"
+        r"|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}"
         r"|[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net"
         r")(:\d+)?$"
     ),
