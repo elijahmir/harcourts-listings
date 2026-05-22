@@ -1,0 +1,3 @@
+# SQLite + runtime artefacts. Backed up by file copies, not git.
+*
+!.gitignore
