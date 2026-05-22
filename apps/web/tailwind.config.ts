@@ -2,7 +2,13 @@ import type { Config } from "tailwindcss";
 import typography from "@tailwindcss/typography";
 
 const config: Config = {
-  darkMode: ["class"],
+  // `media` drives dark variants from prefers-color-scheme — same signal
+  // that globals.css uses for CSS variables. With `class` we'd need a JS
+  // theme provider to toggle `<html class="dark">`, which we don't have,
+  // so dark:* utilities (notably dark:prose-invert) silently no-op'd and
+  // assistant markdown rendered with light-mode prose colors on a dark
+  // background — unreadable.
+  darkMode: "media",
   content: ["./src/**/*.{ts,tsx}"],
   theme: {
     container: {

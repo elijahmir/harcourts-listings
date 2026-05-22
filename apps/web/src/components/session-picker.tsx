@@ -79,9 +79,11 @@ export function SessionPicker({
         aria-label="Open session history"
         aria-haspopup="menu"
         aria-expanded={open}
+        title="Open session history"
+        className="px-2 sm:px-3"
       >
-        <History className="mr-1.5 h-3.5 w-3.5" />
-        History
+        <History className="h-3.5 w-3.5 sm:mr-1.5" />
+        <span className="hidden sm:inline">History</span>
       </Button>
 
       {open && (

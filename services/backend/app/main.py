@@ -206,6 +206,30 @@ async def chat_ws(websocket: WebSocket) -> None:
 
             assistant_text = ""
 
+            # The claude subprocess can take 15–30s for image-heavy turns.
+            # If the WebSocket drops mid-stream (mobile Safari backgrounding,
+            # cellular handoff, screen sleep), we must still consume the
+            # full stream and persist the assistant message — otherwise the
+            # work is lost and the user has no way to see Wendy's reply
+            # when they come back. Strategy: ALWAYS iterate the stream to
+            # completion; WS sends become best-effort, gated by a flag we
+            # flip the first time a send raises.
+            ws_alive = True
+
+            async def _safe_send(payload: dict) -> None:
+                nonlocal ws_alive
+                if not ws_alive:
+                    return
+                try:
+                    await websocket.send_json(payload)
+                except Exception:  # noqa: BLE001 — WS closed mid-turn
+                    ws_alive = False
+                    log.info(
+                        "ws dropped mid-turn (session=%s); continuing to consume "
+                        "claude stream so the assistant message is persisted.",
+                        session_id,
+                    )
+
             try:
                 async for ev in stream_message(
                     user_message=content,
@@ -214,7 +238,8 @@ async def chat_ws(websocket: WebSocket) -> None:
                     claude_bin=settings.claude_bin,
                 ):
                     if isinstance(ev, StreamSummary):
-                        # Persist the assistant turn + bump session totals.
+                        # Persist the assistant turn + bump session totals
+                        # UNCONDITIONALLY — WS state is irrelevant.
                         db.insert_message(
                             session_id=session_id,
                             role="assistant",
@@ -230,7 +255,7 @@ async def chat_ws(websocket: WebSocket) -> None:
                             output_tokens=ev.output_tokens or 0,
                             cost_usd=ev.total_cost_usd or 0.0,
                         )
-                        await websocket.send_json(
+                        await _safe_send(
                             {
                                 "type": "done",
                                 "session_id": session_id,
@@ -250,15 +275,15 @@ async def chat_ws(websocket: WebSocket) -> None:
                         break
 
                     assert isinstance(ev, StreamEvent)
-                    # text_full carries the canonical accumulated text; keep
-                    # it for DB persistence. text_delta is incremental and
-                    # only used for the on-screen typing effect.
+                    # text_full carries the canonical accumulated text;
+                    # text_delta is incremental and only used for the
+                    # on-screen typing effect.
                     if ev.text and ev.kind == "text_full":
                         assistant_text = ev.text
                     elif ev.text and ev.kind == "text_delta" and not assistant_text:
                         assistant_text = ev.text  # fallback if no text_full arrives
 
-                    await websocket.send_json(
+                    await _safe_send(
                         {
                             "type": "chunk",
                             "kind": ev.kind,
@@ -268,7 +293,7 @@ async def chat_ws(websocket: WebSocket) -> None:
                     )
             except Exception as exc:  # noqa: BLE001
                 log.exception("turn failed: %s", exc)
-                await websocket.send_json({"type": "error", "message": str(exc)})
+                await _safe_send({"type": "error", "message": str(exc)})
 
     except WebSocketDisconnect:
         log.info("ws client disconnected")

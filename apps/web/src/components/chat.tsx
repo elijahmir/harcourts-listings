@@ -150,6 +150,40 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     };
   }, [backendUrl, sessionId, setMessages]);
 
+  // Re-fetch history when the WS transitions from non-ready to ready.
+  // Catches the case where a turn was in flight when the WS dropped (mobile
+  // Safari backgrounding, cellular handoff, screen sleep). The backend
+  // keeps consuming the claude stream and persists the message; this
+  // effect pulls the now-persisted reply down to the UI so the user
+  // doesn't see a stuck-forever typing-dots placeholder.
+  const lastStatusRef = useRef<ConnectionStatus | null>(null);
+  useEffect(() => {
+    const prev = lastStatusRef.current;
+    lastStatusRef.current = status;
+    if (!backendUrl || !sessionId) return;
+    if (status !== "ready") return;
+    if (prev === null || prev === "ready") return; // initial mount handled by replay effect
+
+    let cancelled = false;
+    fetchSessionMessages(backendUrl, sessionId)
+      .then((rows) => {
+        if (cancelled || rows.length === 0) return;
+        setMessages(
+          rows.map((r) => ({
+            id: `db-${r.id}`,
+            role: r.role,
+            text: r.content,
+          })),
+        );
+      })
+      .catch((err) => {
+        console.warn("reconnect history refetch failed", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [status, backendUrl, sessionId, setMessages]);
+
   function pickConsultant(next: string) {
     if (!next || next === slug) return;
     setSlug(next);
@@ -413,15 +447,16 @@ function Header({
 }: HeaderProps) {
   return (
     <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
-      <div className="mx-auto flex w-full max-w-3xl items-center gap-3 px-4 py-3">
-        <div className="text-sm font-medium text-muted-foreground">
+      <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-3 py-3 sm:gap-3 sm:px-4">
+        {/* Brand text — hidden on phones; consultant + actions take priority. */}
+        <div className="hidden text-sm font-medium text-muted-foreground sm:block">
           Harcourts
         </div>
         <select
           value={slug ?? ""}
           onChange={(e) => onPickConsultant(e.target.value)}
           disabled={!consultants || consultants.length === 0}
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="h-9 min-w-0 flex-1 truncate rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none sm:min-w-[180px]"
           aria-label="Choose a consultant"
         >
           {consultants === null && <option>Loading…</option>}
@@ -447,9 +482,11 @@ function Header({
           onClick={onNewConversation}
           disabled={!slug}
           aria-label="Start a new conversation"
+          title="Start a new conversation"
+          className="px-2 sm:px-3"
         >
-          <RefreshCcw className="mr-1.5 h-3.5 w-3.5" />
-          New
+          <RefreshCcw className="h-3.5 w-3.5 sm:mr-1.5" />
+          <span className="hidden sm:inline">New</span>
         </Button>
 
         <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
@@ -461,12 +498,14 @@ function Header({
               title="The backend connection dropped. Click to retry."
             >
               <span className="h-2 w-2 rounded-full bg-rose-500" />
-              Reconnect
+              <span className="hidden sm:inline">Reconnect</span>
             </button>
           ) : (
             <StatusDot status={status} />
           )}
-          <span>{userName}</span>
+          {/* Username — hidden on phones to save horizontal space; the status
+              dot alone conveys connection state. */}
+          <span className="hidden sm:inline">{userName}</span>
         </div>
       </div>
     </header>
@@ -571,11 +610,7 @@ function MessageBubble({
               </div>
             )
           ) : (
-            <span className="inline-flex gap-1">
-              <Dot delay={0} />
-              <Dot delay={150} />
-              <Dot delay={300} />
-            </span>
+            <StreamingPlaceholder />
           )}
           {/* Token / cost metadata is intentionally hidden — your team is on
               the Claude Max subscription, so the per-turn dollar figure is
@@ -610,6 +645,37 @@ function MessageBubble({
         )}
       </div>
     </li>
+  );
+}
+
+/** Three pulsing dots for the first 8 seconds, then a friendlier "still
+ *  working" line so the user doesn't think the chat is frozen during
+ *  image-heavy turns (multimodal reads can take 20–30s). */
+function StreamingPlaceholder() {
+  const [showSlowHint, setShowSlowHint] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setShowSlowHint(true), 8000);
+    return () => clearTimeout(t);
+  }, []);
+
+  if (showSlowHint) {
+    return (
+      <span className="inline-flex items-center gap-2 text-xs italic text-muted-foreground">
+        <span className="inline-flex gap-1">
+          <Dot delay={0} />
+          <Dot delay={150} />
+          <Dot delay={300} />
+        </span>
+        Still working — large attachments and complex prompts can take 30 seconds.
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex gap-1">
+      <Dot delay={0} />
+      <Dot delay={150} />
+      <Dot delay={300} />
+    </span>
   );
 }
 
