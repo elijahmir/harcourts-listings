@@ -91,6 +91,8 @@ interface UseChatResult {
   reset: () => void;
   /** Force a fresh reconnect after a give-up. */
   reconnect: () => void;
+  /** Replace the message list — used to seed history on page load. */
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
 }
 
 function makeId(): string {
@@ -336,7 +338,35 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     setIsStreaming(false);
   }, []);
 
-  return { messages, status, isStreaming, send, reset, reconnect };
+  return { messages, status, isStreaming, send, reset, reconnect, setMessages };
+}
+
+// --- History replay ---------------------------------------------------------
+
+/** Row shape returned by GET /api/sessions/{id}/messages. */
+export interface SessionMessageRow {
+  id: number;
+  session_id: string;
+  role: ChatRole;
+  content: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd: number | null;
+  created_at: string;
+}
+
+export async function fetchSessionMessages(
+  backendUrl: string,
+  sessionId: string,
+): Promise<SessionMessageRow[]> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error(`fetchSessionMessages ${res.status}: ${res.statusText}`);
+  }
+  return (await res.json()) as SessionMessageRow[];
 }
 
 // --- REST helpers ----------------------------------------------------------

@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { UploadButton } from "@/components/upload-button";
 import {
   fetchConsultants,
+  fetchSessionMessages,
   saveLearning,
   uploadFiles,
   useChat,
@@ -87,7 +88,7 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     };
   }, [backendUrl]);
 
-  const { messages, status, isStreaming, send, reset, reconnect } = useChat({
+  const { messages, status, isStreaming, send, reset, reconnect, setMessages } = useChat({
     backendUrl,
     consultantSlug: slug,
     userName,
@@ -110,6 +111,40 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // History replay. When the page loads (or the user switches to another
+  // consultant), fetch the persisted message log for the active session
+  // and seed the chat. Without this, refreshing the page wipes the visible
+  // history even though Claude itself (--resume) still remembers it.
+  //
+  // A ref tracks which session we've already replayed, so the WS `done`
+  // event setting sessionId for the FIRST turn doesn't trigger a wasteful
+  // re-fetch that just reads back what we already have on screen.
+  const replayedForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!backendUrl || !sessionId) return;
+    if (replayedForRef.current === sessionId) return;
+    replayedForRef.current = sessionId;
+
+    let cancelled = false;
+    fetchSessionMessages(backendUrl, sessionId)
+      .then((rows) => {
+        if (cancelled || rows.length === 0) return;
+        setMessages(
+          rows.map((r) => ({
+            id: `db-${r.id}`,
+            role: r.role,
+            text: r.content,
+          })),
+        );
+      })
+      .catch((err) => {
+        console.warn("history replay failed", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [backendUrl, sessionId, setMessages]);
+
   function pickConsultant(next: string) {
     if (!next || next === slug) return;
     setSlug(next);
@@ -121,6 +156,7 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     setUploads([]);
     setSavedLearningMessageIds(new Set());
     setEditingLearningForId(null);
+    replayedForRef.current = null; // allow history replay for the new consultant
     reset();
   }
 
@@ -134,6 +170,7 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     setUploads([]);
     setSavedLearningMessageIds(new Set());
     setEditingLearningForId(null);
+    replayedForRef.current = null;
     reset();
   }
 
