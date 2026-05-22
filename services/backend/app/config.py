@@ -22,11 +22,22 @@ class Settings:
             os.environ.get("HARCOURTS_PROJECT_ROOT", str(_DEFAULT_PROJECT_ROOT))
         ).resolve()
         self.consultants_dir: Path = self.project_root / "consultants"
+        # SQLite + future runtime artefacts. Gitignored.
+        self.data_dir: Path = Path(
+            os.environ.get(
+                "HARCOURTS_DATA_DIR", str(self.project_root / "data")
+            )
+        ).resolve()
         self.host: str = os.environ.get("HARCOURTS_BACKEND_HOST", "127.0.0.1")
         self.port: int = int(os.environ.get("HARCOURTS_BACKEND_PORT", "3000"))
         # Path to the `claude` CLI binary. PATH lookup by default; override if
         # the office Mac uses a non-standard install location.
         self.claude_bin: str = os.environ.get("HARCOURTS_CLAUDE_BIN", "claude")
+        # Per-file upload size cap. 25 MB is plenty for property photos and
+        # floor plans; rejects pathological uploads cheaply.
+        self.max_upload_bytes: int = int(
+            os.environ.get("HARCOURTS_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))
+        )
 
     def consultant_folder(self, slug: str) -> Path:
         """Return the on-disk folder for a consultant slug, or raise if missing.

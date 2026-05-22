@@ -8,6 +8,7 @@
 const KEY_USER_NAME = "harcourts.userName";
 const KEY_CONSULTANT_SLUG = "harcourts.consultantSlug";
 const KEY_CLAUDE_SESSION_PREFIX = "harcourts.claudeSessionId.";
+const KEY_SESSION_ID_PREFIX = "harcourts.sessionId.";
 
 function isBrowser(): boolean {
   return typeof window !== "undefined";
@@ -33,7 +34,25 @@ export function setConsultantSlug(slug: string): void {
   localStorage.setItem(KEY_CONSULTANT_SLUG, slug);
 }
 
-/** Each consultant gets its own conversation thread, persisted per-slug. */
+/** Our backend's session id (UUID for the SQLite sessions row).
+ *  One per consultant slug — switching consultants picks up that
+ *  consultant's most-recent conversation.
+ */
+export function getSessionId(slug: string): string | null {
+  if (!isBrowser()) return null;
+  return localStorage.getItem(KEY_SESSION_ID_PREFIX + slug);
+}
+
+export function setSessionId(slug: string, id: string | null): void {
+  if (!isBrowser()) return;
+  if (id === null) {
+    localStorage.removeItem(KEY_SESSION_ID_PREFIX + slug);
+  } else {
+    localStorage.setItem(KEY_SESSION_ID_PREFIX + slug, id);
+  }
+}
+
+/** Claude CLI's own session id, used for ``--resume`` warm-caching. */
 export function getClaudeSessionId(slug: string): string | null {
   if (!isBrowser()) return null;
   return localStorage.getItem(KEY_CLAUDE_SESSION_PREFIX + slug);

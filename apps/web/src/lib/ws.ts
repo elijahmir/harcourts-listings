@@ -3,12 +3,13 @@
  * Protocol mirrors services/backend/app/main.py:
  *
  *   Client → Server:
- *     {type: "user_message", consultant_slug, user_name, content, claude_session_id?}
+ *     {type: "user_message", session_id, consultant_slug,
+ *      user_name, content, claude_session_id}
  *
  *   Server → Client:
  *     {type: "ready"}
- *     {type: "chunk", kind: "text_delta" | "text_full" | ..., text, session_id}
- *     {type: "done",  claude_session_id, tokens, cost_usd, return_code, is_error, error_message}
+ *     {type: "chunk", kind, text, session_id}
+ *     {type: "done",  session_id, claude_session_id, tokens, cost_usd, ...}
  *     {type: "error", message}
  */
 "use client";
@@ -33,6 +34,7 @@ export interface ChatMessage {
 
 interface DoneFrame {
   type: "done";
+  session_id: string;
   claude_session_id: string | null;
   tokens: {
     input: number | null;
@@ -70,9 +72,11 @@ interface UseChatOptions {
   backendUrl: string;
   consultantSlug: string | null;
   userName: string;
+  initialSessionId: string | null;
   initialClaudeSessionId: string | null;
-  /** Fired when a turn completes so callers can persist the session id. */
-  onSessionIdChange?: (id: string | null) => void;
+  /** Fired when the backend confirms a session id (creates or echoes). */
+  onSessionIdChange?: (id: string) => void;
+  onClaudeSessionIdChange?: (id: string | null) => void;
 }
 
 interface SendArgs {
@@ -104,6 +108,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   const [isStreaming, setIsStreaming] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const sessionIdRef = useRef<string | null>(opts.initialSessionId);
   const claudeSessionIdRef = useRef<string | null>(opts.initialClaudeSessionId);
 
   // Track the live assistant message ID so chunk events know what to append to.
@@ -127,12 +132,6 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       handleFrame(frame);
     });
 
-    ws.addEventListener("open", () => {
-      if (cancelled) return;
-      // We treat the server's "ready" frame as the real ready signal; "open"
-      // just means TCP is up.
-    });
-
     ws.addEventListener("close", () => {
       if (cancelled) return;
       setStatus("closed");
@@ -153,7 +152,10 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opts.backendUrl]);
 
-  // Sync the ref when the initial session id changes (e.g. switching consultants).
+  // Sync refs when the consultant changes.
+  useEffect(() => {
+    sessionIdRef.current = opts.initialSessionId;
+  }, [opts.initialSessionId]);
   useEffect(() => {
     claudeSessionIdRef.current = opts.initialClaudeSessionId;
   }, [opts.initialClaudeSessionId]);
@@ -165,8 +167,6 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     }
 
     if (frame.type === "chunk") {
-      // Only render assistant text events. Tool events / system events are
-      // hidden from the user.
       if (frame.kind !== "text_delta" && frame.kind !== "text_full") return;
       if (!frame.text) return;
 
@@ -193,7 +193,6 @@ export function useChat(opts: UseChatOptions): UseChatResult {
                   tokensOut: frame.tokens.output,
                   costUsd: frame.cost_usd,
                 },
-                // If the run errored, surface it inline.
                 text:
                   frame.is_error && frame.error_message
                     ? `${m.text}\n\n_Error: ${frame.error_message}_`
@@ -205,15 +204,18 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       liveAssistantIdRef.current = null;
       setIsStreaming(false);
 
+      if (frame.session_id && frame.session_id !== sessionIdRef.current) {
+        sessionIdRef.current = frame.session_id;
+        opts.onSessionIdChange?.(frame.session_id);
+      }
       if (frame.claude_session_id) {
         claudeSessionIdRef.current = frame.claude_session_id;
-        opts.onSessionIdChange?.(frame.claude_session_id);
+        opts.onClaudeSessionIdChange?.(frame.claude_session_id);
       }
       return;
     }
 
     if (frame.type === "error") {
-      // Surface a top-level error as a synthetic assistant message.
       const id = makeId();
       setMessages((prev) => [
         ...prev,
@@ -255,6 +257,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       ws.send(
         JSON.stringify({
           type: "user_message",
+          session_id: sessionIdRef.current,
           consultant_slug: opts.consultantSlug,
           user_name: opts.userName,
           content,
@@ -274,7 +277,8 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   return { messages, status, isStreaming, send, reset };
 }
 
-/** Fetch the list of consultant slugs from the backend's /healthz endpoint. */
+// --- REST helpers ----------------------------------------------------------
+
 export async function fetchConsultants(backendUrl: string): Promise<string[]> {
   const res = await fetch(`${backendUrl.replace(/\/$/, "")}/healthz`, {
     cache: "no-store",
@@ -282,4 +286,61 @@ export async function fetchConsultants(backendUrl: string): Promise<string[]> {
   if (!res.ok) throw new Error(`healthz returned ${res.status}`);
   const json = (await res.json()) as { consultants?: string[] };
   return json.consultants ?? [];
+}
+
+export interface SaveLearningArgs {
+  backendUrl: string;
+  consultantSlug: string;
+  title: string;
+  trigger: string;
+  rule: string;
+  savedBy: string;
+  sessionId: string | null;
+}
+
+export async function saveLearning(args: SaveLearningArgs): Promise<void> {
+  const res = await fetch(`${args.backendUrl.replace(/\/$/, "")}/api/learnings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      consultant_slug: args.consultantSlug,
+      title: args.title,
+      trigger: args.trigger,
+      rule: args.rule,
+      saved_by: args.savedBy,
+      session_id: args.sessionId,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`saveLearning ${res.status}: ${body || res.statusText}`);
+  }
+}
+
+export interface UploadedFile {
+  session_id: string;
+  original_filename: string;
+  stored_filename: string;
+  relative_path: string;
+  kind: "photo" | "floorplan" | "pdf" | "other";
+  bytes: number;
+  converted_from_heic: boolean;
+}
+
+export async function uploadFiles(
+  backendUrl: string,
+  sessionId: string,
+  files: File[],
+): Promise<UploadedFile[]> {
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f, f.name);
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/upload`,
+    { method: "POST", body: fd },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`upload ${res.status}: ${body || res.statusText}`);
+  }
+  return (await res.json()) as UploadedFile[];
 }
