@@ -18,6 +18,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .runner import StreamEvent, StreamSummary, stream_message
@@ -46,6 +47,21 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url=None,
     lifespan=lifespan,
+)
+
+# CORS for the Next.js dev server. WebSocket handshakes aren't subject to
+# preflight, but `GET /healthz` from the browser is — so we need this for the
+# consultant-list fetch. In production both services are served from the same
+# origin and this becomes moot.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 
