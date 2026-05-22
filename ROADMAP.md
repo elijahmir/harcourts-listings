@@ -14,10 +14,10 @@ Once Canva API access is configured, the system will generate brochure graphics,
 
 Approved listing content will be pushed back into VaultRE as a draft listing for the consultant to review and publish.
 
-## Remote access
+## Multi-user chat UI
 
-ttyd plus Tailscale or Cloudflare Tunnel will be configured on the host MacBook so office staff can access the system from their own devices.
+A polished browser-based chat interface running on the office MacBook, reachable by every teammate over Tailscale. One shared source of truth (the office Mac's filesystem + local SQLite), no per-user sign-in, learnings written back to `consultants/{slug}/knowledge/learnings.md` benefit everyone immediately. Replaces the earlier FastAPI + Supabase stack that was removed during the rebuild.
 
 ## Additional shared library content
 
-Suburb/area guides, market context, brand handbook PDFs, and shared sample listings can be added to shared/library/ as the team builds them.
+Suburb/area guides, market context, brand handbook PDFs, and shared sample listings can be added to `shared/library/` as the team builds them.

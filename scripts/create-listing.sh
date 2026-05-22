@@ -144,17 +144,14 @@ export HARCOURTS_USER_EMAIL="$EMAIL"
 export HARCOURTS_CONSULTANT_SLUG="$SELECTED_SLUG"
 export HARCOURTS_CONSULTANT_NAME="$SELECTED_NAME"
 
-# Load .env (if present) so HARCOURTS_UPLOADER_BASE_URL and any other shared
-# config make it into the Claude session. .env is gitignored.
+# Load .env (if present) so VaultRE and any other shared config make it into
+# the Claude session. .env is gitignored.
 if [[ -f "$PROJECT_ROOT/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
   . "$PROJECT_ROOT/.env"
   set +a
 fi
-
-# Fall back to localhost if the operator hasn't set a Tailnet-reachable URL yet.
-export HARCOURTS_UPLOADER_BASE_URL="${HARCOURTS_UPLOADER_BASE_URL:-http://localhost:8080}"
 
 cd "$TARGET_DIR"
 
@@ -167,8 +164,4 @@ fi
 # the workflow requires (creating session folders, writing session.json, etc.)
 # without nagging the staff member. This still prompts on Bash and other
 # escalations, which is the right safety baseline for an unattended chat.
-#
-# The workspace trust dialog ("Do you trust this folder?") shown on first
-# run in a new directory is handled separately — see docs/HOST-SETUP.md for
-# the one-time admin step that pre-trusts each consultant folder.
 exec claude --permission-mode acceptEdits
