@@ -112,7 +112,14 @@ async def stream_message(
         "--add-dir", str(consultant_folder),
         "--add-dir", str(shared_dir),
         "--add-dir", str(outputs_dir),
-        "--permission-mode", "acceptEdits",
+        # Chat-UI environment: there is no surface to display per-tool
+        # permission prompts (the WebSocket protocol doesn't carry them).
+        # `bypassPermissions` auto-approves all tools EXCEPT what's in
+        # the project's `.claude/settings.json` deny list — so rm -rf,
+        # `git push`, writes to `shared/`, etc. are still blocked.
+        # That deny list IS the safety net here; it gets to do the work
+        # the interactive prompt would've done.
+        "--permission-mode", "bypassPermissions",
         # Tell Claude the chat UI already did consultant selection, so it
         # skips the master CLAUDE.md greeting that asks the user to pick
         # one of seven consultants. Without this the first turn is always
