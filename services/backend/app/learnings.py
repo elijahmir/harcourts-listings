@@ -18,11 +18,22 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
+from .auth import AuthedUser, AuthError, authed_or_raise, extract_bearer
 from .config import get_settings
 from .db import get_db
+
+
+def require_auth(
+    authorization: str | None = Header(default=None),
+) -> AuthedUser:
+    token = extract_bearer(authorization)
+    try:
+        return authed_or_raise(token)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/learnings", tags=["learnings"])
@@ -75,7 +86,10 @@ def _append_to_markdown(slug: str, title: str, trigger: str, rule: str) -> None:
 
 
 @router.post("", response_model=LearningOut, status_code=status.HTTP_201_CREATED)
-async def save_learning(payload: LearningIn) -> LearningOut:
+async def save_learning(
+    payload: LearningIn,
+    _user: AuthedUser = Depends(require_auth),
+) -> LearningOut:
     # Validate the consultant exists before writing anything.
     try:
         get_settings().consultant_folder(payload.consultant_slug)
@@ -105,6 +119,9 @@ async def save_learning(payload: LearningIn) -> LearningOut:
 
 
 @router.get("/{consultant_slug}", response_model=list[LearningOut])
-async def list_learnings_for_consultant(consultant_slug: str) -> list[LearningOut]:
+async def list_learnings_for_consultant(
+    consultant_slug: str,
+    _user: AuthedUser = Depends(require_auth),
+) -> list[LearningOut]:
     rows = get_db().list_learnings(consultant_slug=consultant_slug)
     return [LearningOut(**r) for r in rows]

@@ -19,13 +19,22 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 import json as _json
 from pathlib import Path as _Path
 
+from .auth import AuthedUser, AuthError, authed_or_raise, extract_bearer, extract_ws_bearer
 from .config import get_settings
 from .db import get_db
 from .learnings import router as learnings_router
@@ -166,9 +175,15 @@ app.add_middleware(
         r"|192\.168\.\d{1,3}\.\d{1,3}"
         r"|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}"
         r"|[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net"
+        r"|[a-z0-9-]+\.vercel\.app"  # HUP-Sales-App on Vercel
         r")(:\d+)?$"
     ),
-    allow_credentials=False,
+    # Allow credentials so the browser can send the Authorization header
+    # AND so any future cookie-based session would work. With credentials
+    # on, the response's Access-Control-Allow-Origin can't be '*' — has
+    # to be the specific origin echoed back, which the regex above lets
+    # CORSMiddleware do automatically.
+    allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
@@ -177,8 +192,27 @@ app.include_router(learnings_router)
 app.include_router(uploads_router)
 
 
+def require_auth(
+    authorization: str | None = Header(default=None),
+) -> AuthedUser:
+    """FastAPI dependency for authed REST routes.
+
+    Reads `Authorization: Bearer <jwt>`, verifies via Supabase HS256.
+    In dev mode (HARCOURTS_REQUIRE_AUTH=false) returns a stub user so
+    local Funnel/localhost testing still works without a real session.
+    """
+    token = extract_bearer(authorization)
+    try:
+        return authed_or_raise(token)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
 @app.get("/healthz")
 def healthz() -> dict:
+    """Public — needed by install.sh verify and basic monitoring. Does
+    not expose anything sensitive; the consultant list is already
+    enumerable by anyone who can clone the repo."""
     s = get_settings()
     return {
         "ok": True,
@@ -189,14 +223,21 @@ def healthz() -> dict:
 
 
 @app.get("/api/sessions")
-def list_sessions(consultant_slug: str | None = None, limit: int = 50) -> list[dict]:
+def list_sessions(
+    consultant_slug: str | None = None,
+    limit: int = 50,
+    _user: AuthedUser = Depends(require_auth),
+) -> list[dict]:
     """List recent sessions, optionally filtered by consultant. Used by the
     frontend's sidebar (when one ships)."""
     return get_db().list_sessions(consultant_slug=consultant_slug, limit=limit)
 
 
 @app.get("/api/sessions/{session_id}/messages")
-def list_session_messages(session_id: str) -> list[dict]:
+def list_session_messages(
+    session_id: str,
+    _user: AuthedUser = Depends(require_auth),
+) -> list[dict]:
     """Replay a session's message history. Used when a user reopens a session."""
     if not get_db().get_session(session_id):
         return []
@@ -204,7 +245,10 @@ def list_session_messages(session_id: str) -> list[dict]:
 
 
 @app.get("/api/outputs/{filename:path}")
-def download_output(filename: str) -> FileResponse:
+def download_output(
+    filename: str,
+    _user: AuthedUser = Depends(require_auth),
+) -> FileResponse:
     """Serve a generated artefact from outputs/ for download.
 
     Phase 5 of the workflow writes the listing's Word doc into outputs/ —
@@ -272,7 +316,41 @@ async def chat_ws(websocket: WebSocket) -> None:
     """
     settings = get_settings()
     db = get_db()
-    await websocket.accept()
+
+    # ---- WS auth (before accept) -------------------------------------------
+    # Browsers can't set Authorization on a WS handshake; the client passes
+    # the Supabase access token via the Sec-WebSocket-Protocol header, in
+    # the form:
+    #
+    #     new WebSocket(url, ["harcourts.v1", "bearer." + token])
+    #
+    # which arrives as:
+    #
+    #     Sec-WebSocket-Protocol: harcourts.v1, bearer.<jwt>
+    #
+    # If we ACCEPT the WS with a subprotocol arg, that arg MUST be one of
+    # the protocols the client offered — picking 'harcourts.v1' echoes back
+    # cleanly and hides the bearer from the response header.
+    subprotocol_header = websocket.headers.get("sec-websocket-protocol", "")
+    ws_token = extract_ws_bearer(subprotocol_header)
+    try:
+        authed = authed_or_raise(ws_token)
+    except AuthError as exc:
+        log.info("ws auth failed: %s", exc)
+        # WebSocket close codes: 4401 is our convention for "unauthorized
+        # at the application layer" (the spec reserves 4000-4999 for app use).
+        await websocket.close(code=4401, reason="unauthorized")
+        return
+    # Pick the non-bearer subprotocol to echo. If the client only sent
+    # bearer.* (no plain 'harcourts.v1'), accept without a subprotocol
+    # so we don't echo back a secret-bearing value.
+    chosen_subprotocol: str | None = None
+    for raw_sp in subprotocol_header.split(","):
+        sp = raw_sp.strip()
+        if sp and not sp.startswith("bearer."):
+            chosen_subprotocol = sp
+            break
+    await websocket.accept(subprotocol=chosen_subprotocol)
     await websocket.send_json({"type": "ready"})
 
     try:
@@ -292,7 +370,15 @@ async def chat_ws(websocket: WebSocket) -> None:
 
             slug = (msg.get("consultant_slug") or "").strip()
             content = (msg.get("content") or "").strip()
-            user_name = (msg.get("user_name") or "anonymous").strip() or "anonymous"
+            # The authed email (from the verified JWT) is the source of
+            # truth for who's chatting. The client-supplied user_name is
+            # only honoured in dev mode (where authed.email is the stub).
+            # This prevents impersonation: even if a logged-in user
+            # supplies a different user_name in the WS payload, the
+            # session row gets tagged with their actual Supabase email.
+            user_name = authed.email if authed.sub != "dev-user" else (
+                (msg.get("user_name") or authed.email).strip() or authed.email
+            )
             resume_id = msg.get("claude_session_id") or None
             session_id = msg.get("session_id") or None
 

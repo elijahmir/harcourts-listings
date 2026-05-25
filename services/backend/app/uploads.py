@@ -17,11 +17,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
+from .auth import AuthedUser, AuthError, authed_or_raise, extract_bearer
 from .config import get_settings
 from .db import get_db
+
+
+def require_auth(
+    authorization: str | None = Header(default=None),
+) -> AuthedUser:
+    token = extract_bearer(authorization)
+    try:
+        return authed_or_raise(token)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sessions", tags=["uploads"])
@@ -99,7 +110,11 @@ def _session_photos_dir(session_id: str, consultant_slug: str) -> Path:
 
 
 @router.post("/{session_id}/upload", response_model=list[UploadOut])
-async def upload(session_id: str, files: list[UploadFile]) -> list[UploadOut]:
+async def upload(
+    session_id: str,
+    files: list[UploadFile],
+    _user: AuthedUser = Depends(require_auth),
+) -> list[UploadOut]:
     settings = get_settings()
     sess = get_db().get_session(session_id)
     if not sess:
@@ -167,7 +182,10 @@ async def upload(session_id: str, files: list[UploadFile]) -> list[UploadOut]:
 
 
 @router.delete("/{session_id}/uploads")
-async def clear_uploads(session_id: str) -> dict:
+async def clear_uploads(
+    session_id: str,
+    _user: AuthedUser = Depends(require_auth),
+) -> dict:
     """Wipe the session's photos folder. Used when a user wants a clean Phase 1
     restart. The folder itself is recreated on next upload."""
     sess = get_db().get_session(session_id)
