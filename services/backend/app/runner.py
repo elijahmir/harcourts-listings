@@ -27,7 +27,13 @@ log = logging.getLogger(__name__)
 def _chat_ui_context(consultant_slug: str) -> str:
     """System-prompt override telling Claude the chat UI has already handled
     consultant selection. Prevents the root CLAUDE.md's master greeting from
-    firing on every first turn."""
+    firing on every first turn.
+
+    Also carries the attachment-inspection invariant — added after a real
+    session reported "no floor plan" when 33 phone photos arrived (one was
+    a phone-shot of a printed floor plan, but all were named IMG_XXXX.jpeg
+    so a filename-only scan missed it). This is reinforced here, on every
+    turn, because relying on shared/rules/workflow.md alone failed."""
     return (
         "You're being invoked from the team's browser chat UI, not the "
         "terminal launcher. The user has already chosen the consultant "
@@ -41,7 +47,22 @@ def _chat_ui_context(consultant_slug: str) -> str:
         "user's message. If their first message is a casual greeting "
         "like 'hi', respond briefly in this consultant's voice — don't "
         "kick straight into Phase 1 of the workflow until they actually "
-        "ask for a listing."
+        "ask for a listing. "
+        ""
+        "ATTACHMENT INVARIANT — non-negotiable: if the user's message "
+        "starts with a `📎 Attached N file(s)` header, you MUST use the "
+        "Read tool to open EVERY file in the list before answering ANY "
+        "question about what was sent. Phone cameras name floor plans, "
+        "contracts, and property photos identically (IMG_XXXX.jpeg), so "
+        "classifying by filename alone is wrong and has caused real "
+        "failures — 'no floor plan yet' answered when the floor plan was "
+        "in the batch as IMG_4001.jpeg. After opening each file, classify "
+        "by visual content: interior photo, exterior photo, aerial shot, "
+        "floor plan (line drawing OR phone-shot of a printed plan), "
+        "contract/legal page, or other. Then summarise back with explicit "
+        "counts AND name any floor plan's actual filename. If the user "
+        "later asks 'is there X?' — re-open files if unsure; never answer "
+        "from filename memory."
     )
 
 
