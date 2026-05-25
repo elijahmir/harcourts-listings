@@ -13,10 +13,10 @@
 #   ./scripts/sync-to-hup.sh --dry-run             # show what would change
 #
 # This script is intentionally simple — no smart import-path rewriting,
-# no diff filtering. After it runs, the HUP-Sales-App-side adapter
-# (src/components/harcourts-chat/index.tsx) takes care of bridging
-# Supabase identity into the chat hook. If that adapter ever needs to
-# change, edit it there; this script never touches it.
+# no diff filtering. The Supabase identity adapter lives at
+# src/components/harcourts-chat/index.tsx in HUP-Sales-App and is
+# intentionally NOT in the FILES list below, so re-running this never
+# overwrites it. If that adapter needs to change, edit it directly.
 set -euo pipefail
 
 SRC_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
@@ -54,6 +54,7 @@ FILES=(
 LIB_FILES=(
   "lib/ws.ts"
   "lib/utils.ts"
+  "lib/storage.ts"
 )
 
 for f in "${FILES[@]}"; do
