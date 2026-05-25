@@ -29,7 +29,11 @@ class Settings:
             )
         ).resolve()
         self.host: str = os.environ.get("HARCOURTS_BACKEND_HOST", "127.0.0.1")
-        self.port: int = int(os.environ.get("HARCOURTS_BACKEND_PORT", "3000"))
+        # 8787 was picked over the common 3000 to avoid collisions with
+        # Obsidian's Local REST API plugin and other dev servers that
+        # default to 3000. Override with HARCOURTS_BACKEND_PORT if the
+        # host needs something else.
+        self.port: int = int(os.environ.get("HARCOURTS_BACKEND_PORT", "8787"))
         # Path to the `claude` CLI binary. PATH lookup by default; override if
         # the office Mac uses a non-standard install location.
         self.claude_bin: str = os.environ.get("HARCOURTS_CLAUDE_BIN", "claude")

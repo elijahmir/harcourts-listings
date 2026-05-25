@@ -2,7 +2,64 @@
 
 End-to-end setup for a fresh Mac. Designed so a human OR a Claude Code agent reading this file can complete the whole thing top-to-bottom without external context. Every step lists the exact command, the expected outcome, and what to do if it doesn't.
 
-> **TL;DR for someone who's done this before:** `git clone`, `./scripts/install.sh`, `claude login`, paste four lines into `.claude/settings.json`, `./scripts/install.sh verify`, `./scripts/install.sh launchd`, `tailscale up`, `./scripts/install.sh funnel`, done. Teammates use the public HTTPS URL — no install on their devices.
+> **TL;DR for someone who's done this before:** complete the [one-time tailnet bootstrap](#0-one-time-tailscale-tailnet-bootstrap-do-this-once-ever) (3 admin-console clicks) if not done, then on the host: `git clone`, `./scripts/install.sh`, `claude login`, paste four lines into `.claude/settings.json`, `./scripts/install.sh verify`, `./scripts/install.sh launchd`, `tailscale up --authkey=$TS_AUTHKEY`, `./scripts/install.sh funnel`, done. Teammates use the public HTTPS URL — no install on their devices.
+
+---
+
+## 0. One-time Tailscale tailnet bootstrap (do this once, ever)
+
+**Read this even if you are Claude-on-Neo.** Three settings in the Tailscale admin console MUST be enabled before `./scripts/install.sh funnel` will succeed on any host. They are **tailnet-level, not node-level** — done once for the whole organization, persisting forever — but **two of them cannot be set via the Tailscale REST API**, because enabling HTTPS Certificates is a legal opt-in to having your `.ts.net` hostnames published in Let's Encrypt's public Certificate Transparency log. The CLI commands will fail with `"Serve is not enabled on your tailnet"` until these are done.
+
+**If you are Claude reading this on Neo: STOP and ask the user to perform steps 0.1–0.3 in their browser before proceeding to step 1.** You cannot do these yourself. Don't try.
+
+### 0.1 Enable MagicDNS and HTTPS Certificates
+
+Open <https://login.tailscale.com/admin/dns>. Sign in as a tailnet Owner or Admin.
+
+- Confirm **MagicDNS** is enabled (toggle at top).
+- Scroll to **HTTPS Certificates** and click **Enable HTTPS** (accept the Let's Encrypt CT-log opt-in).
+
+### 0.2 Grant Funnel capability via the ACL policy file
+
+Open <https://login.tailscale.com/admin/acls/file>. Add this block at the top level of the JSON (alongside `acls`), then click **Save**:
+
+```json
+"nodeAttrs": [
+  {
+    "target": ["autogroup:member"],
+    "attr":   ["funnel"]
+  }
+]
+```
+
+(If you have tagged hosts and prefer least-privilege, swap `autogroup:member` for the relevant `tag:` selector.)
+
+### 0.3 (Optional but recommended) Generate a pre-auth key for unattended host bringup
+
+For Neo and any future host where you want `tailscale up` to run via SSH without a browser prompt:
+
+- Open <https://login.tailscale.com/admin/settings/keys>.
+- Click **Generate auth key**. Make it **reusable** (if you'll add multiple hosts), **ephemeral=off**, and **pre-approved** if your tailnet requires device approval.
+- Copy the resulting `tskey-auth-...` value.
+
+Export it in the shell before running `install.sh` on the new host:
+
+```bash
+export TS_AUTHKEY=tskey-auth-XXXXXXXXXXXXX
+```
+
+Without this key, `tailscale up` prompts for a browser login on the host — fine when you're sitting at the machine, blocking when Claude is running it over SSH.
+
+### Verify the bootstrap
+
+From any host already on the tailnet:
+
+```bash
+tailscale funnel --bg --yes --set-path=/_probe 8787
+tailscale funnel reset
+```
+
+If that runs silently and exits 0, the bootstrap is complete. If it prints `Serve is not enabled on your tailnet`, redo step 0.1.
 
 ---
 
@@ -172,7 +229,7 @@ Verify both came up:
 
 ```bash
 sleep 4
-curl -s http://127.0.0.1:3000/healthz | python3 -m json.tool   # backend
+curl -s http://127.0.0.1:8787/healthz | python3 -m json.tool   # backend
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3010/  # frontend (200 = good)
 ```
 
@@ -234,9 +291,9 @@ What it does (so you can debug if it fails):
    | Path | Backend |
    |---|---|
    | `/` | Next.js frontend on `127.0.0.1:3010` |
-   | `/api/*` | FastAPI on `127.0.0.1:3000` |
-   | `/healthz` | FastAPI on `127.0.0.1:3000` |
-   | `/ws/*` | FastAPI WebSocket on `127.0.0.1:3000` |
+   | `/api/*` | FastAPI on `127.0.0.1:8787` |
+   | `/healthz` | FastAPI on `127.0.0.1:8787` |
+   | `/ws/*` | FastAPI WebSocket on `127.0.0.1:8787` |
 4. Enables `tailscale funnel` on port 443.
 5. Prints the public URL (e.g. `https://your-mac.tail-xxxxxx.ts.net`).
 
@@ -295,7 +352,7 @@ Once steps 1–6 are done:
 
 | Service | Port | Logs | How to restart |
 |---|---|---|---|
-| `com.harcourts.backend` (FastAPI + WS) | `0.0.0.0:3000` | `/tmp/harcourts-backend.log` | `launchctl unload && load` of the plist, or `./scripts/install.sh restart` |
+| `com.harcourts.backend` (FastAPI + WS) | `0.0.0.0:8787` | `/tmp/harcourts-backend.log` | `launchctl unload && load` of the plist, or `./scripts/install.sh restart` |
 | `com.harcourts.web` (Next.js prod build) | `0.0.0.0:3010` | `/tmp/harcourts-web.log` | same |
 
 The data:
@@ -353,7 +410,7 @@ If you've been asked to set up this system on a fresh Mac, follow these steps in
      ```
    Wait for confirmation that all three are done.
 5. **Definitive permissions check:** run `./scripts/install.sh verify`. Must print `✓ claude responded cleanly. This Mac is ready.` If it fails, follow the printed remedies and re-run.
-6. **Auto-start on boot:** run `./scripts/install.sh launchd`. Verify both services come up with `curl -s http://127.0.0.1:3000/healthz` and `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3010/`.
+6. **Auto-start on boot:** run `./scripts/install.sh launchd`. Verify both services come up with `curl -s http://127.0.0.1:8787/healthz` and `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3010/`.
 7. **Publish to teammates:** run `./scripts/install.sh funnel`. The script prints the public HTTPS URL (e.g. `https://your-mac.tail-xxxxxx.ts.net`). If the script fails because Funnel isn't enabled for the tailnet, ask the human to visit <https://login.tailscale.com/admin/dns> and toggle Funnel on, then re-run.
 8. **Smoke test from outside:** run `curl -s https://<funnel-url>/healthz`. Must return JSON with `"ok": true` and the consultant list. Then ask the human to open the URL on their phone over cellular (Wi-Fi off) and confirm the chat works.
 9. **Hand off:** report the public URL, confirm it's been smoke-tested, and tell the human to share it only with the trusted team.

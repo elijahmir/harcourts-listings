@@ -214,7 +214,7 @@ write_backend_plist() {
     <string>--host</string>
     <string>0.0.0.0</string>
     <string>--port</string>
-    <string>3000</string>
+    <string>8787</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${BACKEND_DIR}</string>
@@ -294,7 +294,7 @@ cmd_launchd() {
   echo
   note "Logs:  tail -f /tmp/harcourts-backend.log"
   note "       tail -f /tmp/harcourts-web.log"
-  note "Test:  curl -s http://127.0.0.1:3000/healthz"
+  note "Test:  curl -s http://127.0.0.1:8787/healthz"
   note "       open http://127.0.0.1:3010"
 }
 
@@ -318,17 +318,17 @@ cmd_uninstall() {
 
 # --- Tailscale Funnel ------------------------------------------------------
 # Tailscale Funnel exposes ONE entry point publicly over HTTPS. Our stack has
-# two ports (frontend on 3010, backend on 3000), so we use Tailscale Serve
-# with path-based routing to fan out behind that single entry point:
+# two ports (frontend on 3010, backend on 8787), so we register each path
+# as a public Funnel route to fan out behind that single entry point:
 #
 #   /          → frontend (3010)
-#   /api/*     → backend  (3000)
-#   /healthz   → backend  (3000)
-#   /ws/*      → backend  (3000)  ← WebSocket; Tailscale proxies HTTP/1.1 Upgrade
+#   /api/*     → backend  (8787)
+#   /healthz   → backend  (8787)
+#   /ws/*      → backend  (8787)  ← WebSocket; Tailscale proxies HTTP/1.1 Upgrade
 #
-# The Tailscale CLI syntax has shifted across versions (1.48 → 1.56+). This
-# script targets the modern `tailscale serve --bg --set-path` form. If your
-# Tailscale is older, the commands print here as a manual reference.
+# This script targets Tailscale 1.96+ (the `--set-path` form on `funnel`
+# directly; the old `serve` then `funnel <target>` pattern silently
+# clobbered the / mapping in 1.96, see the funnel block below).
 
 resolve_tailscale_cli() {
   # Prefer brew-installed CLI, then App Store version's bundled binary.
@@ -356,12 +356,30 @@ cmd_funnel() {
   fi
   green "  tailscale CLI: $TS ($("$TS" version 2>&1 | head -1))"
 
-  # Confirm tailscale is logged in.
+  # Confirm tailscale is logged in. If TS_AUTHKEY is exported in the env,
+  # attempt unattended bringup using it — this is what makes Neo (or any
+  # SSH-only host) work without a human in front of a browser. The key
+  # comes from https://login.tailscale.com/admin/settings/keys and should
+  # be set BEFORE running this script:
+  #     export TS_AUTHKEY=tskey-auth-XXXXXX
+  #     ./scripts/install.sh funnel
   if ! "$TS" status >/dev/null 2>&1; then
-    red "  not logged into Tailscale on this Mac."
-    note "  Run:  $TS up"
-    note "  (a browser opens, sign in to your team's Tailscale account, then re-run this command.)"
-    return 1
+    if [[ -n "${TS_AUTHKEY:-}" ]]; then
+      note "  TS_AUTHKEY found — running unattended \`tailscale up\`…"
+      if ! "$TS" up --authkey="$TS_AUTHKEY" --accept-routes 2>&1; then
+        red "  unattended tailscale up failed. Check that TS_AUTHKEY is valid"
+        red "  (regenerate at https://login.tailscale.com/admin/settings/keys)."
+        return 1
+      fi
+      green "  tailscale up succeeded via TS_AUTHKEY."
+    else
+      red "  not logged into Tailscale on this Mac."
+      note "  Two options:"
+      note "    A) Interactive:  $TS up    (browser opens, sign in, re-run this command)"
+      note "    B) Unattended:   export TS_AUTHKEY=tskey-auth-XXXX  &&  re-run this command"
+      note "       Generate the key at https://login.tailscale.com/admin/settings/keys"
+      return 1
+    fi
   fi
   local TAILNET_NAME
   TAILNET_NAME="$("$TS" status --self --json 2>/dev/null \
@@ -374,34 +392,75 @@ cmd_funnel() {
     green "  tailnet hostname: $TAILNET_NAME"
   fi
 
+  # Pre-flight: confirm the one-time tailnet bootstrap has been done. Three
+  # things must be on at the *tailnet* level (not per-node) — none of them
+  # can be set via the Tailscale REST API (enabling HTTPS certs is a
+  # legal opt-in to Let's Encrypt's public CT log), so this pre-flight
+  # cannot self-heal. It can only fail loudly with the exact URLs to click.
+  # See docs/HOST-SETUP.md section 0 for the full rationale.
+  hdr "Pre-flight: tailnet bootstrap check"
+  local PROBE_OUT
+  PROBE_OUT="$("$TS" serve --bg --yes --set-path=/_probe 3010 </dev/null 2>&1 || true)"
+  "$TS" serve reset >/dev/null 2>&1 || true
+  if echo "$PROBE_OUT" | grep -qiE "serve is not enabled|funnel is not allowed|not allowed to use funnel"; then
+    red "  Tailnet bootstrap incomplete. The Tailscale admin console toggles"
+    red "  must be set ONCE for the whole tailnet before any host can serve"
+    red "  a Funnel URL. These are NOT API-settable."
+    echo
+    note "  Open these three URLs in a browser and complete them:"
+    note "  1) https://login.tailscale.com/admin/dns"
+    note "       — turn on MagicDNS and HTTPS Certificates"
+    note "  2) https://login.tailscale.com/admin/acls/file"
+    note "       — add the nodeAttrs funnel block (see HOST-SETUP.md §0.2)"
+    note "  3) https://login.tailscale.com/admin/settings/keys (optional)"
+    note "       — generate a TS_AUTHKEY for unattended host bringup"
+    echo
+    note "  Raw CLI output for diagnosis:"
+    echo "$PROBE_OUT" | sed 's/^/    /'
+    return 1
+  fi
+  green "  Tailnet bootstrap looks good — proceeding."
+
   # Wipe any existing serve/funnel state so this is idempotent.
-  note "tearing down any previous tailscale serve/funnel config…"
-  "$TS" serve reset 2>/dev/null || "$TS" serve --bg off 2>/dev/null || true
-  "$TS" funnel reset 2>/dev/null || "$TS" funnel --bg off 2>/dev/null || true
+  note "  tearing down any previous tailscale serve/funnel config…"
+  "$TS" serve reset >/dev/null 2>&1 || true
+  "$TS" funnel reset >/dev/null 2>&1 || true
 
-  # Configure path-based routing. The syntax `tailscale serve --bg --set-path=<path> proxy <port>`
-  # works on 1.50+. If your tailscale is older, see the docs at
-  # https://tailscale.com/kb/1311/tailscale-serve.
-  hdr "Configuring Tailscale Serve (path → port routing)"
+  # Configure path-based routing directly via `tailscale funnel`. Two
+  # gotchas baked in from earlier debugging — both verified live:
+  #
+  #   1. The `funnel <target>` form (no --set-path) means "proxy / to
+  #      target", which silently overwrites any existing / mapping. Don't
+  #      use that pattern.
+  #   2. `--set-path=/X 8787` strips the /X prefix when forwarding (treats
+  #      port as http://127.0.0.1:8787 with no path), so a request to
+  #      /healthz hits the backend's / route → 404. The fix is to pass a
+  #      full target URL including the path: the prefix is still stripped
+  #      but the target's own path is appended, so the net request to the
+  #      backend keeps the original path. Verified: /api/sessions/X →
+  #      http://127.0.0.1:8787/api/sessions/X.
+  #
+  #   /          → frontend (3010)
+  #   /api/*     → backend  (8787) at /api/*
+  #   /healthz   → backend  (8787) at /healthz
+  #   /ws/*      → backend  (8787) at /ws/*  (WS upgrade flows through)
+  hdr "Configuring Tailscale Funnel (path → port routing, all public)"
   set +e
-  "$TS" serve --bg --set-path=/        proxy 3010
-  "$TS" serve --bg --set-path=/api     proxy 3000
-  "$TS" serve --bg --set-path=/healthz proxy 3000
-  "$TS" serve --bg --set-path=/ws      proxy 3000
-  set -e
-
-  # Enable Funnel for public access.
-  hdr "Enabling Funnel (publishing to the internet)"
-  set +e
-  "$TS" funnel --bg 443
+  "$TS" funnel --bg --yes --set-path=/        3010
+  "$TS" funnel --bg --yes --set-path=/api     http://127.0.0.1:8787/api
+  "$TS" funnel --bg --yes --set-path=/healthz http://127.0.0.1:8787/healthz
+  "$TS" funnel --bg --yes --set-path=/ws      http://127.0.0.1:8787/ws
   local rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
     red "  funnel command failed (exit $rc)."
     note "  Common causes:"
-    note "  1. Funnel needs to be enabled for this account in the Tailscale admin console."
-    note "     Visit: https://login.tailscale.com/admin/dns and enable Funnel."
-    note "  2. CLI syntax differs in your version. Try \`$TS funnel --help\`."
+    note "  1. Funnel isn't enabled for this node yet. Visit:"
+    note "       https://login.tailscale.com/admin/settings/funnel"
+    note "     and add this machine's name to the allowed list."
+    note "  2. HTTPS certs aren't enabled. Visit:"
+    note "       https://login.tailscale.com/admin/dns"
+    note "     and enable both MagicDNS and HTTPS certificates."
     return 1
   fi
 
@@ -561,7 +620,7 @@ print_next_steps() {
    prints an install/login hint, follow it and re-run.
 
 Smoke test locally first:
-   curl -s http://127.0.0.1:3000/healthz | python3 -m json.tool
+   curl -s http://127.0.0.1:8787/healthz | python3 -m json.tool
    open http://127.0.0.1:3010
 
 Then over the public URL (after funnel is up):

@@ -10,17 +10,19 @@ import { getUserName, setUserName } from "@/lib/storage";
  * Resolve the backend URL at runtime — handles three deployment shapes.
  *
  * 1. Dev on this Mac: browser at http://localhost:3010 → backend at
- *    http://localhost:3000 (different port, frontend and backend
- *    served independently).
+ *    http://localhost:8787 (different port, frontend and backend
+ *    served independently). Port 8787 was chosen over the more common
+ *    3000 to dodge collisions with Obsidian's Local REST API plugin
+ *    and Node's default dev port.
  * 2. LAN / tailnet direct: browser at http://my-mac.tail-xxx.ts.net:3010
- *    → backend at http://my-mac.tail-xxx.ts.net:3000. Same shape as dev.
+ *    → backend at http://my-mac.tail-xxx.ts.net:8787. Same shape as dev.
  * 3. Production via Tailscale Funnel (or any reverse proxy): browser
  *    at https://my-mac.tail-xxx.ts.net (no explicit port). The proxy
  *    in front routes / to the frontend and /api, /healthz, /ws to the
  *    backend. From the browser's perspective everything is same-origin.
  *
  * Detection rule: if window.location has an explicit port, we're in case
- * 1 or 2, append :3000. If not, we're in case 3 (Funnel), use same-origin.
+ * 1 or 2, append :8787. If not, we're in case 3 (Funnel), use same-origin.
  *
  * NEXT_PUBLIC_BACKEND_URL overrides this entire derivation if set —
  * useful for unusual setups (e.g. backend on a different host).
@@ -35,10 +37,10 @@ function resolveBackendUrl(): string {
       // Funnel / reverse proxy: same origin handles everything.
       return `${protocol}//${hostname}`;
     }
-    // Dev or LAN direct: backend lives on the same host, port 3000.
-    return `${protocol}//${hostname}:3000`;
+    // Dev or LAN direct: backend lives on the same host, port 8787.
+    return `${protocol}//${hostname}:8787`;
   }
-  return "http://127.0.0.1:3000"; // SSR fallback; never actually hit
+  return "http://127.0.0.1:8787"; // SSR fallback; never actually hit
 }
 
 export default function Home() {
