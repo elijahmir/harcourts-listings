@@ -183,9 +183,123 @@ setup_env_file() {
   hdr "Project root .env"
   if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
     cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
-    yellow "  copied .env.example -> .env (fill in real VaultRE keys when ready)"
+    yellow "  copied .env.example -> .env (filling in details next)"
   else
-    green "  .env exists"
+    green "  .env exists — only filling in missing values"
+  fi
+  prompt_missing_env_vars
+}
+
+# Read a key from .env. Empty string if absent or unset.
+_get_env() {
+  local key="$1"
+  local val
+  val="$(grep -E "^${key}=" "$PROJECT_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  echo "$val"
+}
+
+# Set a key in .env (in-place if present, append otherwise). Quotes the
+# value to handle whitespace + special chars cleanly. The marker comment
+# above each block makes it obvious where each value came from on later
+# inspection.
+_set_env() {
+  local key="$1" val="$2" comment="${3:-}"
+  local tmp
+  tmp="$(mktemp)"
+  if grep -qE "^${key}=" "$PROJECT_ROOT/.env" 2>/dev/null; then
+    # Existing line — replace its value with the new one. Using awk to
+    # avoid sed's portability headaches around special chars on macOS.
+    awk -v k="$key" -v v="$val" '
+      BEGIN{FS=OFS="="}
+      $1==k {print k"="v; next}
+      {print}
+    ' "$PROJECT_ROOT/.env" > "$tmp"
+    mv "$tmp" "$PROJECT_ROOT/.env"
+  else
+    {
+      [[ -n "$comment" ]] && printf "\n# %s\n" "$comment"
+      printf "%s=%s\n" "$key" "$val"
+    } >> "$PROJECT_ROOT/.env"
+  fi
+}
+
+# Prompts the operator for any required env vars that are missing. Stdin
+# is /dev/tty so we don't get tripped up if the script is piped from a
+# remote one-liner. If stdin can't be opened (truly headless context),
+# we skip prompting and just print a checklist the operator can fill in.
+prompt_missing_env_vars() {
+  local interactive=true
+  if [[ ! -t 0 ]] && ! exec 0</dev/tty 2>/dev/null; then
+    interactive=false
+  fi
+
+  hdr "Checking required secrets in .env"
+
+  # ---- VaultRE -----------------------------------------------------------
+  local vre_key="$(_get_env VAULTRE_API_KEY)"
+  local vre_tok="$(_get_env VAULTRE_API_TOKEN)"
+  if [[ -z "$vre_key" || "$vre_key" == "REPLACE_ME" ]]; then
+    if [[ "$interactive" == true ]]; then
+      echo
+      note "  Need VaultRE API key (from your VaultRE admin)."
+      read -r -p "    VAULTRE_API_KEY: " vre_key
+      [[ -n "$vre_key" ]] && _set_env VAULTRE_API_KEY "$vre_key"
+    else
+      yellow "  VAULTRE_API_KEY missing — set it in .env before running funnel."
+    fi
+  else
+    green "  VAULTRE_API_KEY present"
+  fi
+  if [[ -z "$vre_tok" || "$vre_tok" == "REPLACE_ME" ]]; then
+    if [[ "$interactive" == true ]]; then
+      read -r -p "    VAULTRE_API_TOKEN: " vre_tok
+      [[ -n "$vre_tok" ]] && _set_env VAULTRE_API_TOKEN "$vre_tok"
+    else
+      yellow "  VAULTRE_API_TOKEN missing — set it in .env before running funnel."
+    fi
+  else
+    green "  VAULTRE_API_TOKEN present"
+  fi
+
+  # ---- Supabase JWT secret (production auth) -----------------------------
+  # Skip prompting if the operator explicitly opted into dev mode. On a
+  # production host, this secret is the entire gate between Funnel-public
+  # URL and the chat backend — without it, anyone who learns the URL is
+  # in. Make this prompt loud.
+  local require_auth="$(_get_env HARCOURTS_REQUIRE_AUTH)"
+  if [[ "$require_auth" != "false" ]]; then
+    local jwt_secret="$(_get_env HARCOURTS_SUPABASE_JWT_SECRET)"
+    if [[ -z "$jwt_secret" || "$jwt_secret" == "REPLACE_ME" ]]; then
+      if [[ "$interactive" == true ]]; then
+        echo
+        note "  Need Supabase JWT Secret (from Supabase admin →"
+        note "  Project Settings → API → JWT Secret). Without this, the"
+        note "  chat backend rejects every Vercel/browser request as 401."
+        note "  (To skip and run in unauthed dev mode, leave blank and we"
+        note "  will set HARCOURTS_REQUIRE_AUTH=false.)"
+        read -r -p "    HARCOURTS_SUPABASE_JWT_SECRET: " jwt_secret
+        if [[ -n "$jwt_secret" ]]; then
+          _set_env HARCOURTS_SUPABASE_JWT_SECRET "$jwt_secret" \
+            "Supabase JWT signing secret (HS256) — required for production auth"
+          _set_env HARCOURTS_REQUIRE_AUTH "true" \
+            "Reject unauthed requests when true"
+          green "  Supabase JWT secret saved — auth ENABLED"
+        else
+          _set_env HARCOURTS_REQUIRE_AUTH "false" \
+            "Dev mode: skip JWT verification (do NOT use in production)"
+          yellow "  No secret entered — falling back to DEV mode (no auth)"
+          yellow "  Re-run \`./scripts/install.sh\` to set it later."
+        fi
+      else
+        yellow "  HARCOURTS_SUPABASE_JWT_SECRET missing and no TTY for"
+        yellow "  prompting. Add it to .env before exposing the funnel."
+      fi
+    else
+      green "  HARCOURTS_SUPABASE_JWT_SECRET present — auth enabled"
+      _set_env HARCOURTS_REQUIRE_AUTH "true"
+    fi
+  else
+    yellow "  HARCOURTS_REQUIRE_AUTH=false (dev mode — funnel URL is open)"
   fi
 }
 
@@ -479,6 +593,26 @@ Tailscale installed. Any device on any network can reach it.
 Quick test:
    curl -sI https://${TAILNET_NAME} | head -1            # → HTTP/2 200
    curl -s https://${TAILNET_NAME}/healthz               # → JSON with consultants
+
+============================================================
+  ⚡  NEXT — wire this URL into HUP-Sales-App on Vercel
+============================================================
+
+Copy these EXACT key/value pairs into Vercel env vars
+(HUP-Sales-App project → Settings → Environment Variables):
+
+  NEXT_PUBLIC_HARCOURTS_BACKEND_URL = https://${TAILNET_NAME}
+
+Then redeploy the Vercel app so the build picks up the new value:
+
+   cd /path/to/HUP-Sales-App
+   vercel --prod
+
+(or click "Redeploy" in the Vercel dashboard)
+
+Once that's done, /dashboard/copypro on the live HUP-Sales-App will
+talk to this Mac's backend over HTTPS.
+============================================================
 EOF
   else
     cat <<EOF
