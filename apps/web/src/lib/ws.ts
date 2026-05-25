@@ -55,6 +55,14 @@ interface ChunkFrame {
   session_id: string | null;
 }
 
+interface ActivityFrame {
+  // Transient hint of what Claude is doing right now ("Reading IMG_4001.jpeg",
+  // "VaultRE: 158 Preservation", "Writing brochure-text.docx"). Not persisted.
+  type: "activity";
+  summary: string;
+  tool: string | null;
+}
+
 interface ErrorFrame {
   type: "error";
   message: string;
@@ -64,7 +72,12 @@ interface ReadyFrame {
   type: "ready";
 }
 
-type ServerFrame = ReadyFrame | ChunkFrame | DoneFrame | ErrorFrame;
+type ServerFrame =
+  | ReadyFrame
+  | ChunkFrame
+  | ActivityFrame
+  | DoneFrame
+  | ErrorFrame;
 
 export type ConnectionStatus = "connecting" | "ready" | "closed" | "error";
 
@@ -87,6 +100,9 @@ interface UseChatResult {
   messages: ChatMessage[];
   status: ConnectionStatus;
   isStreaming: boolean;
+  /** Latest tool-activity summary from the backend, or null if Claude is
+   * thinking but not actively in a tool call. Cleared on 'done'. */
+  activity: string | null;
   send: (args: SendArgs) => void;
   reset: () => void;
   /** Force a fresh reconnect after a give-up. */
@@ -110,6 +126,9 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [isStreaming, setIsStreaming] = useState(false);
+  // Latest tool-call summary from the backend, e.g. "Reading IMG_4001.jpeg".
+  // Cleared on 'done' or 'error'. Drives the StillWorkingBadge UI.
+  const [activity, setActivity] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(opts.initialSessionId);
@@ -266,6 +285,14 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       return;
     }
 
+    if (frame.type === "activity") {
+      // Update the live ticker. Persists until the next activity arrives
+      // or the turn ends ('done' / 'error') — so a brief tool call still
+      // shows long enough for the user to notice.
+      setActivity(frame.summary);
+      return;
+    }
+
     if (frame.type === "done") {
       const liveId = liveAssistantIdRef.current;
       setMessages((prev) =>
@@ -289,6 +316,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       );
       liveAssistantIdRef.current = null;
       setIsStreaming(false);
+      setActivity(null);
 
       if (frame.session_id && frame.session_id !== sessionIdRef.current) {
         sessionIdRef.current = frame.session_id;
@@ -314,6 +342,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       ]);
       liveAssistantIdRef.current = null;
       setIsStreaming(false);
+      setActivity(null);
       return;
     }
   }
@@ -339,6 +368,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       liveAssistantIdRef.current = assistantId;
       setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
       setIsStreaming(true);
+      setActivity(null);
 
       ws.send(
         JSON.stringify({
@@ -367,9 +397,19 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     sessionIdRef.current = null;
     claudeSessionIdRef.current = null;
     setIsStreaming(false);
+    setActivity(null);
   }, []);
 
-  return { messages, status, isStreaming, send, reset, reconnect, setMessages };
+  return {
+    messages,
+    status,
+    isStreaming,
+    activity,
+    send,
+    reset,
+    reconnect,
+    setMessages,
+  };
 }
 
 // --- Session list -----------------------------------------------------------

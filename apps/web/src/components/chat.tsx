@@ -93,7 +93,16 @@ export function Chat({ userName, backendUrl }: ChatProps) {
     };
   }, [backendUrl]);
 
-  const { messages, status, isStreaming, send, reset, reconnect, setMessages } = useChat({
+  const {
+    messages,
+    status,
+    isStreaming,
+    activity,
+    send,
+    reset,
+    reconnect,
+    setMessages,
+  } = useChat({
     backendUrl,
     consultantSlug: slug,
     userName,
@@ -331,6 +340,7 @@ export function Chat({ userName, backendUrl }: ChatProps) {
                 key={m.id}
                 message={m}
                 backendUrl={backendUrl}
+                activity={m.streaming ? activity : null}
                 editing={editingLearningForId === m.id}
                 saved={savedLearningMessageIds.has(m.id)}
                 onStartSave={() => setEditingLearningForId(m.id)}
@@ -397,7 +407,10 @@ export function Chat({ userName, backendUrl }: ChatProps) {
               placeholder={
                 status !== "ready"
                   ? `Connecting to backend…`
-                  : `Message ${slug ? prettySlug(slug) : "the consultant"}…`
+                  : isStreaming
+                    ? activity ??
+                      `${slug ? prettySlug(slug) : "The consultant"} is replying…`
+                    : `Message ${slug ? prettySlug(slug) : "the consultant"}…`
               }
               disabled={status !== "ready" || !slug || isStreaming}
               aria-label="Message"
@@ -553,6 +566,9 @@ function EmptyState({ slug }: { slug: string | null }) {
 interface MessageBubbleProps {
   message: ChatMessage;
   backendUrl: string;
+  /** Live tool-activity summary from the backend; non-null only while
+   * this message is streaming. Drives the StillWorkingBadge text. */
+  activity: string | null;
   editing: boolean;
   saved: boolean;
   defaultTrigger: string;
@@ -581,6 +597,7 @@ function extractOutputFilenames(text: string): string[] {
 function MessageBubble({
   message,
   backendUrl,
+  activity,
   editing,
   saved,
   defaultTrigger,
@@ -642,7 +659,7 @@ function MessageBubble({
               </div>
             )
           ) : (
-            <StreamingPlaceholder />
+            <StreamingPlaceholder activity={activity} />
           )}
           {/* Token / cost metadata is intentionally hidden — your team is on
               the Claude Max subscription, so the per-turn dollar figure is
@@ -658,6 +675,7 @@ function MessageBubble({
           <StillWorkingBadge
             text={message.text}
             streaming={!!message.streaming}
+            activity={activity}
           />
         )}
 
@@ -721,14 +739,25 @@ function MessageBubble({
 /** Three pulsing dots for the first 8 seconds, then a friendlier "still
  *  working" line so the user doesn't think the chat is frozen during
  *  image-heavy turns (multimodal reads can take 20–30s). */
-function StreamingPlaceholder() {
+function StreamingPlaceholder({ activity }: { activity: string | null }) {
   const [showSlowHint, setShowSlowHint] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setShowSlowHint(true), 8000);
     return () => clearTimeout(t);
   }, []);
 
-  if (showSlowHint) {
+  // Prefer the live tool-activity summary from the backend (e.g.
+  // "Reading IMG_4001.jpeg") over the static slow-hint copy. Activity
+  // text only appears once Claude actually starts calling a tool, so
+  // the slow-hint serves as the "Claude is thinking, hasn't called
+  // anything yet" fallback.
+  const label = activity ?? (
+    showSlowHint
+      ? "Still working — large attachments and complex prompts can take 30 seconds."
+      : null
+  );
+
+  if (label) {
     return (
       <span className="inline-flex items-center gap-2 text-xs italic text-muted-foreground">
         <span className="inline-flex gap-1">
@@ -736,7 +765,7 @@ function StreamingPlaceholder() {
           <Dot delay={150} />
           <Dot delay={300} />
         </span>
-        Still working — large attachments and complex prompts can take 30 seconds.
+        {label}
       </span>
     );
   }
@@ -759,9 +788,11 @@ function StreamingPlaceholder() {
 function StillWorkingBadge({
   text,
   streaming,
+  activity,
 }: {
   text: string;
   streaming: boolean;
+  activity: string | null;
 }) {
   const [stalled, setStalled] = useState(false);
 
@@ -776,7 +807,13 @@ function StillWorkingBadge({
     return () => clearTimeout(t);
   }, [text, streaming]);
 
-  if (!streaming || !stalled) return null;
+  // Show the badge IF streaming and EITHER (a) we have an active tool
+  // call summary from the backend, OR (b) text has stalled for 5s. The
+  // activity from the backend is the strongest signal and skips the
+  // staleness wait — if Claude IS in a tool call right now, surface
+  // that immediately even after a fresh text delta.
+  const visible = streaming && (activity !== null || stalled);
+  if (!visible) return null;
   return (
     <span className="mt-2 inline-flex items-center gap-2 self-start text-xs italic text-muted-foreground">
       <span className="inline-flex gap-1">
@@ -784,7 +821,7 @@ function StillWorkingBadge({
         <Dot delay={150} />
         <Dot delay={300} />
       </span>
-      Still working — reading attachments and drafting…
+      {activity ?? "Still working…"}
     </span>
   );
 }

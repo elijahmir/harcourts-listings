@@ -33,6 +33,44 @@ from .runner import StreamEvent, StreamSummary, stream_message
 from .uploads import router as uploads_router
 
 
+def _summarise_tool_use(name: str | None, inp: dict | None) -> str:
+    """Plain-English one-liner for a tool call. Drives the UI's activity
+    ticker so a tool-heavy turn shows ("Reading IMG_4001.jpeg", "Searching
+    VaultRE: 158 Preservation") instead of a static "Working…" spinner."""
+    name = (name or "").lower()
+    inp = inp or {}
+    if name == "read":
+        path = inp.get("file_path") or inp.get("path") or ""
+        leaf = path.rsplit("/", 1)[-1] if path else ""
+        return f"Reading {leaf or path}"
+    if name == "bash":
+        cmd = (inp.get("command") or "").strip()
+        if cmd.startswith("./scripts/vaultre.sh"):
+            sub = cmd.split(" ", 1)[-1].strip()
+            return f"VaultRE: {sub[:80]}"
+        # First word is usually informative.
+        head = cmd.split(None, 1)[0] if cmd else ""
+        return f"Running {head}" if head else "Running command"
+    if name == "write":
+        path = inp.get("file_path") or ""
+        return f"Writing {path.rsplit('/', 1)[-1] or path}"
+    if name == "edit":
+        path = inp.get("file_path") or ""
+        return f"Editing {path.rsplit('/', 1)[-1] or path}"
+    if name == "webfetch" or name == "web_fetch":
+        return f"Fetching {(inp.get('url') or '')[:80]}"
+    if name == "websearch" or name == "web_search":
+        return f"Searching the web: {(inp.get('query') or '')[:80]}"
+    if name == "grep":
+        return f"Searching: {(inp.get('pattern') or '')[:80]}"
+    if name == "glob":
+        return f"Finding files: {(inp.get('pattern') or '')[:80]}"
+    if name == "task" or name == "agent":
+        return "Delegating to a subagent"
+    # Unknown / future tools — show the tool name itself.
+    return (name.capitalize() if name else "Working") + "…"
+
+
 def _recover_assistant_text_from_jsonl(claude_session_id: str) -> str:
     """Last-resort recovery: read Claude Code's own session jsonl and
     extract the most recent assistant message's text.
@@ -425,6 +463,23 @@ async def chat_ws(websocket: WebSocket) -> None:
                     # 0 chars and the UI showed a forever-stuck placeholder.
                     if ev.text and ev.kind in ("text_delta", "text_full"):
                         assistant_text = ev.text
+
+                    # Live activity ticker for the UI. tool_use events
+                    # would otherwise be silent on the client (the chunk
+                    # handler only renders text_delta/text_full), leaving
+                    # users staring at a frozen bubble during long tool-
+                    # heavy turns. This frame is purely transient — it's
+                    # not persisted to SQLite.
+                    if ev.kind == "tool_use":
+                        await _safe_send(
+                            {
+                                "type": "activity",
+                                "summary": _summarise_tool_use(
+                                    ev.tool_name, ev.tool_input
+                                ),
+                                "tool": ev.tool_name,
+                            }
+                        )
 
                     await _safe_send(
                         {

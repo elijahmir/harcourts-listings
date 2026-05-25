@@ -76,6 +76,11 @@ class StreamEvent:
     session_id: str | None = None
     # Populated for kind in {'text_delta', 'text_full'}
     text: str | None = None
+    # Populated for kind='tool_use' — the tool the assistant just called.
+    # Used by main.py to emit live activity frames to the WS client so
+    # the UI can show "Reading IMG_4001.jpeg" instead of a static spinner.
+    tool_name: str | None = None
+    tool_input: dict[str, Any] | None = field(default=None, repr=False)
     # Populated for kind='result'
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -242,11 +247,24 @@ def _parse(obj: dict[str, Any]) -> StreamEvent:
         return ev
 
     if kind == "assistant":
-        # --include-partial-messages emits incremental chunks AND a final full
-        # message. Both arrive as "assistant" events; partials have
-        # stop_reason=None.
+        # --include-partial-messages emits incremental chunks AND a final
+        # full message. Both arrive as "assistant" events; partials have
+        # stop_reason=None. The content array can hold text blocks OR
+        # tool_use blocks (when the assistant calls a tool). We need to
+        # surface tool calls separately so the UI can show what Claude
+        # is actually doing — otherwise tool-only turns look like silent
+        # gaps to the user.
         msg = obj.get("message") or {}
-        for block in msg.get("content") or []:
+        content = msg.get("content") or []
+        tool_block = next(
+            (b for b in content if b.get("type") == "tool_use"), None
+        )
+        if tool_block is not None:
+            ev.kind = "tool_use"
+            ev.tool_name = tool_block.get("name")
+            ev.tool_input = tool_block.get("input") or {}
+            return ev
+        for block in content:
             if block.get("type") == "text":
                 ev.text = block.get("text", "")
                 break
