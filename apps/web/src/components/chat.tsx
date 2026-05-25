@@ -1,6 +1,6 @@
 "use client";
 
-import { BookmarkPlus, RefreshCcw, Send, X } from "lucide-react";
+import { BookmarkPlus, Download, RefreshCcw, Send, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -330,6 +330,7 @@ export function Chat({ userName, backendUrl }: ChatProps) {
               <MessageBubble
                 key={m.id}
                 message={m}
+                backendUrl={backendUrl}
                 editing={editingLearningForId === m.id}
                 saved={savedLearningMessageIds.has(m.id)}
                 onStartSave={() => setEditingLearningForId(m.id)}
@@ -551,6 +552,7 @@ function EmptyState({ slug }: { slug: string | null }) {
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  backendUrl: string;
   editing: boolean;
   saved: boolean;
   defaultTrigger: string;
@@ -559,8 +561,26 @@ interface MessageBubbleProps {
   onSubmitSave: (args: { title: string; trigger: string; rule: string }) => Promise<void>;
 }
 
+// Pull every `outputs/<name>.docx` reference out of an assistant message
+// so we can render a per-file download button below the prose. Phase 5
+// of the workflow writes Word docs to outputs/ and tells the user where;
+// without this parser the user could see the filename but couldn't
+// actually get the file on a phone. Pattern is intentionally tight:
+// "outputs/" prefix is the marker, filename stops at whitespace, quotes,
+// or closing markdown punctuation.
+const OUTPUTS_DOCX_RE = /outputs\/([A-Za-z0-9._\-]+\.docx)/g;
+
+function extractOutputFilenames(text: string): string[] {
+  const seen = new Set<string>();
+  for (const m of text.matchAll(OUTPUTS_DOCX_RE)) {
+    seen.add(m[1]);
+  }
+  return [...seen];
+}
+
 function MessageBubble({
   message,
+  backendUrl,
   editing,
   saved,
   defaultTrigger,
@@ -571,6 +591,13 @@ function MessageBubble({
   const isUser = message.role === "user";
   const canSave =
     !isUser && !message.streaming && message.text.trim().length > 0;
+  const downloadable = useMemo(
+    () =>
+      !isUser && !message.streaming
+        ? extractOutputFilenames(message.text)
+        : [],
+    [isUser, message.streaming, message.text],
+  );
 
   return (
     <li className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
@@ -622,6 +649,40 @@ function MessageBubble({
               misleading. Raw counts are still persisted in SQLite for
               diagnostics. */}
         </div>
+
+        {!isUser && (
+          <StillWorkingBadge
+            text={message.text}
+            streaming={!!message.streaming}
+          />
+        )}
+
+        {downloadable.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 self-start">
+            {downloadable.map((filename) => (
+              <a
+                key={filename}
+                // backendUrl is "" briefly on first paint; we hide the
+                // link until it's resolved so iOS Safari doesn't bind
+                // a broken href.
+                href={
+                  backendUrl
+                    ? `${backendUrl}/api/outputs/${encodeURIComponent(filename)}`
+                    : undefined
+                }
+                // `download` is a hint; the backend ALWAYS sets
+                // Content-Disposition: attachment, which is what
+                // actually persuades iOS Safari to save to Files
+                // instead of opening Quick Look.
+                download={filename}
+                className="inline-flex items-center gap-1.5 rounded-md border border-input bg-background px-2.5 py-1 text-xs font-medium text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground"
+              >
+                <Download className="h-3.5 w-3.5" />
+                {filename}
+              </a>
+            ))}
+          </div>
+        )}
 
         {canSave && !editing && !saved && (
           <button
@@ -680,6 +741,46 @@ function StreamingPlaceholder() {
       <Dot delay={0} />
       <Dot delay={150} />
       <Dot delay={300} />
+    </span>
+  );
+}
+
+// Shows a "still thinking" indicator BELOW the bubble when streaming is
+// active but text hasn't grown for a while. Solves today's failure mode:
+// Claude said "Files received. Preparing the brief now." then went silent
+// for ~30s reading 32 photos, and the user typed "what happen?" thinking
+// the chat had died. The streaming dots in StreamingPlaceholder only show
+// when the bubble is empty — once any text lands, they disappear. This
+// badge fills that gap.
+function StillWorkingBadge({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const [stalled, setStalled] = useState(false);
+
+  useEffect(() => {
+    if (!streaming) {
+      setStalled(false);
+      return;
+    }
+    // Any text update resets the gap timer. After 5s of no growth, show.
+    setStalled(false);
+    const t = setTimeout(() => setStalled(true), 5000);
+    return () => clearTimeout(t);
+  }, [text, streaming]);
+
+  if (!streaming || !stalled) return null;
+  return (
+    <span className="mt-2 inline-flex items-center gap-2 self-start text-xs italic text-muted-foreground">
+      <span className="inline-flex gap-1">
+        <Dot delay={0} />
+        <Dot delay={150} />
+        <Dot delay={300} />
+      </span>
+      Still working — reading attachments and drafting…
     </span>
   );
 }

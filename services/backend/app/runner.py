@@ -122,6 +122,20 @@ async def stream_message(
     project_root = consultant_folder.parent.parent
     shared_dir = project_root / "shared"
     outputs_dir = project_root / "outputs"
+    # Empty MCP config + --strict-mcp-config disables ALL MCP servers
+    # for this subprocess. Without these two flags, the host's global
+    # MCP config (Docusign / Gmail / Google Calendar / Google Drive /
+    # Supabase, etc. — whatever the user has configured in Claude
+    # Desktop or Claude Code at the user level) leaks into the chat
+    # stream as "tool-permission prompts" that the WebSocket has no
+    # surface to render. Result in today's session: the user typed
+    # "what happen?" twice because the chat went silent while these
+    # prompts piled up off-screen. We don't need any MCP servers for
+    # the listing workflow — local file ops via Read/Write/Bash plus
+    # the VaultRE CLI wrapper cover everything.
+    empty_mcp_config = (
+        project_root / "services" / "backend" / "config" / "empty-mcp.json"
+    )
 
     args = [
         claude_bin,
@@ -141,6 +155,12 @@ async def stream_message(
         # That deny list IS the safety net here; it gets to do the work
         # the interactive prompt would've done.
         "--permission-mode", "bypassPermissions",
+        # Suppress all MCP servers in this subprocess (see comment above
+        # the empty_mcp_config Path). --strict-mcp-config forces the CLI
+        # to ignore user/system MCP config and use only what --mcp-config
+        # provides, which is an empty {"mcpServers": {}}.
+        "--strict-mcp-config",
+        "--mcp-config", str(empty_mcp_config),
         # Tell Claude the chat UI already did consultant selection, so it
         # skips the master CLAUDE.md greeting that asks the user to pick
         # one of seven consultants. Without this the first turn is always

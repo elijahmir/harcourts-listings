@@ -19,8 +19,9 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 import json as _json
 from pathlib import Path as _Path
@@ -162,6 +163,46 @@ def list_session_messages(session_id: str) -> list[dict]:
     if not get_db().get_session(session_id):
         return []
     return get_db().list_messages(session_id=session_id)
+
+
+@app.get("/api/outputs/{filename:path}")
+def download_output(filename: str) -> FileResponse:
+    """Serve a generated artefact from outputs/ for download.
+
+    Phase 5 of the workflow writes the listing's Word doc into outputs/ —
+    users on their phones need a way to actually get the file. This route
+    lets the chat UI render a download button when an assistant message
+    references `outputs/<name>.docx`.
+
+    Hardening:
+      - Path is resolved against settings.project_root / outputs and
+        rejected if it escapes (path-traversal defence). FastAPI's
+        `{filename:path}` lets `/` through in the URL — we explicitly
+        re-resolve and check.
+      - Only `.docx` for now. If we later generate PDFs etc., widen the
+        suffix allowlist; do not remove it.
+    """
+    s = get_settings()
+    outputs_root = (s.project_root / "outputs").resolve()
+    target = (outputs_root / filename).resolve()
+    if not str(target).startswith(str(outputs_root) + "/") and target != outputs_root:
+        raise HTTPException(status_code=400, detail="invalid path")
+    if target.suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="only .docx downloads are allowed")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(
+        path=target,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ),
+        filename=target.name,
+        headers={
+            "Content-Disposition": f'attachment; filename="{target.name}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.websocket("/ws/chat")

@@ -1,0 +1,4 @@
+{
+  "_comment": "Intentionally empty. Combined with --strict-mcp-config, this disables all MCP servers in the chat subprocess. Stops global MCP configs (Docusign/Gmail/Google Calendar/Google Drive/Supabase) from leaking notice-text into the chat stream during long tool-heavy turns. See services/backend/app/runner.py for usage.",
+  "mcpServers": {}
+}
