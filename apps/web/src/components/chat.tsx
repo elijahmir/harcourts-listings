@@ -650,7 +650,11 @@ function MessageBubble({
               diagnostics. */}
         </div>
 
-        {!isUser && (
+        {/* Only show the "still working" badge once the bubble has some
+            text. While the bubble is empty, StreamingPlaceholder (inside
+            the bubble) already shows the same indicator — rendering both
+            simultaneously produced a duplicated "Still working" stack. */}
+        {!isUser && message.text.length > 0 && (
           <StillWorkingBadge
             text={message.text}
             streaming={!!message.streaming}
