@@ -16,12 +16,46 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+// ---------------------------------------------------------------------------
+// Auth plumbing — set once by the page that hosts this chat. Every REST
+// helper and the WS hook read this lazily so token rotation works (Supabase
+// access tokens expire ~1h; supabase-js refreshes them on demand).
+//
+// In the standalone harcourts-listings app this stays null and the backend
+// runs in dev mode. In HUP-Sales-App, components/harcourts-chat/index.tsx
+// calls configureAuth() once with a supabase.auth.getSession() wrapper.
+// ---------------------------------------------------------------------------
+
+let _getAccessToken: (() => Promise<string | null>) | null = null;
+
+export function configureAuth(
+  getAccessToken: () => Promise<string | null>,
+): void {
+  _getAccessToken = getAccessToken;
+}
+
+async function authHeaders(): Promise<HeadersInit> {
+  if (!_getAccessToken) return {};
+  const token = await _getAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function bearerSubprotocol(): Promise<string | null> {
+  if (!_getAccessToken) return null;
+  const token = await _getAccessToken();
+  return token ? `bearer.${token}` : null;
+}
+
 export type ChatRole = "user" | "assistant";
 
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   text: string;
+  /** Epoch ms. Set when the message is created (user send / assistant
+   * placeholder) OR pulled from the DB's `created_at`. Drives the small
+   * timestamp under each bubble. */
+  createdAt: number;
   /** True while this assistant message is still being streamed. */
   streaming?: boolean;
   /** Populated on the assistant message once the turn finishes. */
@@ -175,11 +209,18 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     const RETRY_DELAYS_MS = [0, 500, 1000, 2000, 4000, 5000];
     const MAX_ATTEMPTS = 8;
 
-    const connect = () => {
+    const connect = async () => {
       if (cancelled) return;
       setStatus("connecting");
+      // Pass any configured bearer token via Sec-WebSocket-Protocol —
+      // browsers don't allow custom WS handshake headers, but the
+      // protocol list is settable from the WebSocket constructor.
+      const bearer = await bearerSubprotocol();
+      const protocols = bearer
+        ? ["harcourts.v1", bearer]
+        : ["harcourts.v1"];
       try {
-        ws = new WebSocket(toWsUrl(opts.backendUrl));
+        ws = new WebSocket(toWsUrl(opts.backendUrl), protocols);
       } catch (err) {
         console.error("invalid backend URL", opts.backendUrl, err);
         setStatus("error");
@@ -301,6 +342,12 @@ export function useChat(opts: UseChatOptions): UseChatResult {
             ? {
                 ...m,
                 streaming: false,
+                // Refresh the timestamp to the moment the assistant
+                // actually finished. The placeholder was created when
+                // the user sent the message, which can be 5-60s ago
+                // for tool-heavy turns. Shown time should reflect the
+                // reply, not the prompt.
+                createdAt: Date.now(),
                 meta: {
                   tokensIn: frame.tokens.input,
                   tokensOut: frame.tokens.output,
@@ -338,6 +385,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
           role: "assistant",
           text: `_Server error: ${frame.message}_`,
           streaming: false,
+          createdAt: Date.now(),
         },
       ]);
       liveAssistantIdRef.current = null;
@@ -353,10 +401,12 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (!opts.consultantSlug) return;
 
+      const now = Date.now();
       const userMsg: ChatMessage = {
         id: makeId(),
         role: "user",
         text: content,
+        createdAt: now,
       };
       const assistantId = makeId();
       const assistantPlaceholder: ChatMessage = {
@@ -364,6 +414,10 @@ export function useChat(opts: UseChatOptions): UseChatResult {
         role: "assistant",
         text: "",
         streaming: true,
+        // Placeholder timestamp; gets refreshed when the assistant
+        // turn finishes via the `done` frame so the visible time
+        // matches when Claude actually answered.
+        createdAt: now,
       };
       liveAssistantIdRef.current = assistantId;
       setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
@@ -436,12 +490,78 @@ export async function fetchSessions(
   if (consultantSlug) params.set("consultant_slug", consultantSlug);
   const res = await fetch(
     `${backendUrl.replace(/\/$/, "")}/api/sessions?${params.toString()}`,
-    { cache: "no-store" },
+    { cache: "no-store", headers: await authHeaders() },
   );
   if (!res.ok) {
     throw new Error(`fetchSessions ${res.status}: ${res.statusText}`);
   }
   return (await res.json()) as SessionRow[];
+}
+
+/**
+ * Preview of what `deleteSession()` would remove. Returned by
+ * `GET /api/sessions/{id}/cleanup-preview` — used by the confirm modal
+ * so the user sees actual file counts before clicking "Delete
+ * permanently".
+ */
+export interface DeletePreview {
+  session_id: string;
+  uploads: number;
+  deliverables: number;
+  deliverable_names: string[];
+}
+
+/** Non-destructive count of what a session DELETE will wipe. Returns
+ *  the structured preview, or throws with the server detail on
+ *  failure. The session-picker treats a thrown preview as "soft fail" —
+ *  the confirm modal still opens, just without the file counts. */
+export async function fetchDeletePreview(
+  backendUrl: string,
+  sessionId: string,
+): Promise<DeletePreview> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/cleanup-preview`,
+    { cache: "no-store", headers: await authHeaders() },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail || "";
+    } catch {
+      detail = res.statusText;
+    }
+    throw new Error(`fetchDeletePreview ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as DeletePreview;
+}
+
+/**
+ * Hard-delete a session — DB rows + the on-disk session folder + any
+ * `outputs/` deliverables the session generated. Auth required (the
+ * backend rejects with 403 if you don't own the session in production
+ * mode). Throws with the server's detail message on failure so the
+ * caller can surface it.
+ */
+export async function deleteSession(
+  backendUrl: string,
+  sessionId: string,
+): Promise<void> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "DELETE",
+      headers: await authHeaders(),
+    },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail || "";
+    } catch {
+      detail = res.statusText;
+    }
+    throw new Error(`deleteSession ${res.status}: ${detail}`);
+  }
 }
 
 // --- History replay ---------------------------------------------------------
@@ -464,7 +584,7 @@ export async function fetchSessionMessages(
 ): Promise<SessionMessageRow[]> {
   const res = await fetch(
     `${backendUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
-    { cache: "no-store" },
+    { cache: "no-store", headers: await authHeaders() },
   );
   if (!res.ok) {
     throw new Error(`fetchSessionMessages ${res.status}: ${res.statusText}`);
@@ -496,7 +616,10 @@ export interface SaveLearningArgs {
 export async function saveLearning(args: SaveLearningArgs): Promise<void> {
   const res = await fetch(`${args.backendUrl.replace(/\/$/, "")}/api/learnings`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeaders()),
+    },
     body: JSON.stringify({
       consultant_slug: args.consultantSlug,
       title: args.title,
@@ -531,7 +654,13 @@ export async function uploadFiles(
   for (const f of files) fd.append("files", f, f.name);
   const res = await fetch(
     `${backendUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/upload`,
-    { method: "POST", body: fd },
+    {
+      method: "POST",
+      body: fd,
+      // FormData sets Content-Type with the multipart boundary itself,
+      // so only Authorization is added here.
+      headers: await authHeaders(),
+    },
   );
   if (!res.ok) {
     const body = await res.text().catch(() => "");

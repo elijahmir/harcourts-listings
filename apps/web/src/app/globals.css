@@ -3,77 +3,55 @@
 @tailwind utilities;
 
 @layer base {
-  /* Color strategy: restrained (impeccable's product default) — tinted
-   * neutrals at hue 215 (slate-blue, real-estate-appropriate), one
-   * primary that carries CTAs, no decorative accents. Nothing is pure
-   * #fff or #000 — every neutral has a hint of brand hue so the
-   * interface doesn't feel synthetic.
+  /* Harcourts brand palette — sourced from the official Harcourts
+   * Branding JSON (see HUP-Sales-App repo). Primary cyan #00ADEF carries
+   * every CTA; navy #001F49 is the typographic anchor; everything else
+   * is the lightest possible slate tint so the chat feels like part of
+   * the corporate dashboard, not a separate product.
    *
-   * Hue 215 = slate-blue. Says "professional, trustworthy, considered."
-   * Distinguishes us from the default-Claude.ai grey-on-grey aesthetic
-   * without being on-the-nose about real estate. */
+   * 4px corner radius is the Harcourts spec (NOT the previous 0.625rem
+   * — corporate brand wants crisper corners than the "considered"
+   * register would imply).
+   *
+   * Tailwind v3 reads these as bare HSL components (no hsl() wrapper)
+   * and the tailwind.config.ts colors map wraps them with hsl(var(--x)).
+   * Each value below is "H S% L%" form.
+   */
   :root {
-    --background: 215 25% 99%;
-    --foreground: 215 30% 12%;
-    --card: 215 25% 99%;
-    --card-foreground: 215 30% 12%;
-    --primary: 215 35% 18%;
-    --primary-foreground: 215 25% 99%;
-    --secondary: 215 18% 95%;
-    --secondary-foreground: 215 30% 12%;
-    --muted: 215 18% 95%;
-    --muted-foreground: 215 14% 42%;
-    --accent: 215 18% 92%;
-    --accent-foreground: 215 30% 12%;
-    --destructive: 0 70% 48%;
-    --destructive-foreground: 215 25% 99%;
-    --border: 215 18% 90%;
-    --input: 215 18% 90%;
-    --ring: 215 35% 30%;
-    --radius: 0.625rem;
+    /* core surfaces */
+    --background: 0 0% 100%;            /* #FFFFFF */
+    --foreground: 215 100% 14%;         /* #001F49 navy */
+    --card: 0 0% 100%;
+    --card-foreground: 215 100% 14%;
+    /* Harcourts cyan #00ADEF — the only accent that lives on real CTAs */
+    --primary: 197 100% 47%;
+    --primary-foreground: 0 0% 100%;
+    /* Muted surfaces — slate-50 / slate-100 echoes for cards inside the
+     * chat (assistant bubble background, code-block backdrop). */
+    --secondary: 210 40% 96%;           /* slate-100 ish */
+    --secondary-foreground: 215 100% 14%;
+    --muted: 210 40% 98%;               /* slate-50 */
+    --muted-foreground: 215 16% 47%;    /* slate-600 */
+    /* Accent — cyan-tinted highlight for hover states + the sparkle
+     * background behind the empty-state avatar. */
+    --accent: 197 92% 95%;              /* very light cyan, ~sky-50 */
+    --accent-foreground: 215 100% 14%;
+    --destructive: 0 72% 51%;           /* red-500 */
+    --destructive-foreground: 0 0% 100%;
+    /* Borders + inputs — slate-200, very faint so the chat reads as
+     * "open whitespace" rather than "boxed in". */
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    /* Focus rings use the brand cyan so keyboard nav looks intentional. */
+    --ring: 197 100% 47%;
+    --radius: 4px;
   }
 
-  .dark {
-    --background: 215 30% 6%;
-    --foreground: 215 12% 96%;
-    --card: 215 30% 8%;
-    --card-foreground: 215 12% 96%;
-    --primary: 215 12% 96%;
-    --primary-foreground: 215 30% 12%;
-    --secondary: 215 22% 14%;
-    --secondary-foreground: 215 12% 96%;
-    --muted: 215 22% 14%;
-    --muted-foreground: 215 12% 68%;
-    --accent: 215 22% 16%;
-    --accent-foreground: 215 12% 96%;
-    --destructive: 0 62% 44%;
-    --destructive-foreground: 215 12% 96%;
-    --border: 215 22% 14%;
-    --input: 215 22% 14%;
-    --ring: 215 12% 80%;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --background: 215 30% 6%;
-      --foreground: 215 12% 96%;
-      --card: 215 30% 8%;
-      --card-foreground: 215 12% 96%;
-      --primary: 215 12% 96%;
-      --primary-foreground: 215 30% 12%;
-      --secondary: 215 22% 14%;
-      --secondary-foreground: 215 12% 96%;
-      --muted: 215 22% 14%;
-      --muted-foreground: 215 12% 68%;
-      --accent: 215 22% 16%;
-      --accent-foreground: 215 12% 96%;
-      --destructive: 0 62% 44%;
-      --destructive-foreground: 215 12% 96%;
-      --border: 215 22% 14%;
-      --input: 215 22% 14%;
-      --ring: 215 12% 80%;
-    }
-  }
+  /* No dark-mode block. Harcourts brand spec is light-only and the
+   * dashboard chrome around this chat is white anyway. If a future
+   * dark mode is desired, scope it to the wrapper element, NOT here,
+   * so the corporate look stays consistent across teams that share
+   * the harcourts-listings repo. */
 }
 
 @layer base {
@@ -83,10 +61,64 @@
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+    /* Source Sans Pro is loaded via next/font in layout.tsx; this
+     * applies its CSS variable as the default font stack so every
+     * un-styled text element inherits the brand typeface. */
+    font-family: var(--font-source-sans), system-ui, -apple-system,
+      "Segoe UI", Roboto, sans-serif;
   }
 
   /* Prose color overrides live in tailwind.config.ts under
    * theme.extend.typography.DEFAULT.css — that's the only place
    * Tailwind Typography's --tw-prose-* variables can be overridden
    * with the right cascade priority. Don't try to set them here. */
+}
+
+/* Auto-hide scrollbar for the chat message list. Bar is always
+ * reserved (no twitch), only the thumb's colour changes on hover.
+ * Three layers:
+ *   1. `::-webkit-scrollbar { width: 8px }` — explicit width so the
+ *      column is permanent at 8px regardless of hover state.
+ *   2. `scrollbar-gutter: stable` — modern browsers reserve the
+ *      column natively, no JS measurement needed.
+ *   3. `@supports not (scrollbar-gutter: stable)` fallback — older
+ *      browsers get a manual `padding-right` reservation.
+ * Bar fades in via the thumb's background-color transition on
+ * hover; column width itself never changes. */
+.chat-scroll {
+  scrollbar-gutter: stable;
+}
+.chat-scroll::-webkit-scrollbar {
+  width: 8px;
+  background: transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999px;
+  transition: background-color 220ms ease;
+}
+.chat-scroll:hover::-webkit-scrollbar-thumb {
+  background-color: rgb(148 163 184 / 0.55);  /* slate-400/55 */
+}
+.chat-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(100 116 139 / 0.8);   /* slate-500/80 */
+}
+/* Firefox: scrollbar-color drives both the thumb and track. Auto-hide
+ * via two values where the first (thumb) is the visible accent and
+ * the second (track) stays transparent. Setting both transparent
+ * by default + slate on hover gives the same visual rhythm. */
+.chat-scroll {
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+}
+.chat-scroll:hover {
+  scrollbar-color: rgb(148 163 184 / 0.55) transparent;
+}
+/* Old Chromium / Edge that pre-dates scrollbar-gutter: reserve the
+ * column manually so the chat doesn't twitch sideways when the bar
+ * appears. Modern browsers ignore this @supports branch. */
+@supports not (scrollbar-gutter: stable) {
+  .chat-scroll {
+    padding-right: 8px;
+  }
 }
