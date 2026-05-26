@@ -107,6 +107,39 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    def delete_session(self, session_id: str) -> bool:
+        """Hard-delete a session row and every message attached to it.
+
+        Returns True if the session existed and was removed, False if it
+        was already gone. Deletion runs inside a single transaction so a
+        crash mid-cascade leaves the database consistent — we don't end
+        up with orphaned messages whose parent session has vanished.
+
+        Filesystem cleanup (the session's photos folder) is the caller's
+        job — keeps the DB layer ignorant of disk paths.
+
+        Learnings are intentionally NOT cascaded: a voice rule that came
+        out of a session is a durable thing (it lives in the consultant's
+        knowledge/learnings.md too) and should survive the session it
+        was born from.
+        """
+        with self._lock:
+            cur = self._conn.cursor()
+            try:
+                cur.execute("BEGIN")
+                cur.execute(
+                    "DELETE FROM messages WHERE session_id = ?", (session_id,),
+                )
+                result = cur.execute(
+                    "DELETE FROM sessions WHERE id = ?", (session_id,),
+                )
+                deleted = result.rowcount > 0
+                self._conn.commit()
+                return deleted
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def update_session_after_turn(
         self,
         *,

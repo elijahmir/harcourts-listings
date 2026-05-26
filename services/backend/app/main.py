@@ -42,42 +42,175 @@ from .runner import StreamEvent, StreamSummary, stream_message
 from .uploads import router as uploads_router
 
 
+# Patterns we want to KNOW about (not block) when they show up in a
+# user's WS message. The prompt handles the response; this is just so
+# the operator can see attempted abuse in /tmp/harcourts-backend.log
+# and decide whether to lock things down further. Keep the patterns
+# tight — false positives in property descriptions ('DROP off the
+# kids') would spam the log. We match on multi-token signatures, not
+# single keywords.
+_SUSPICIOUS_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = []
+
+
+def _compile_suspicious_patterns() -> None:
+    """Lazy compile so the import isn't at module load time."""
+    import re as _re
+    if _SUSPICIOUS_PATTERNS:
+        return
+    # Patterns deliberately err on the side of false-positive — this is
+    # audit-only logging, not blocking. Sample input is truncated to 300
+    # chars in the log so noisy property descriptions don't hide the
+    # signal. All patterns case-insensitive.
+    rules = [
+        # Classic SQLi probe shapes: quote followed by OR/AND/UNION
+        ("sqli_probe",
+         r"(?i)['\"]\s*(?:or|and|union)\s+"),
+        # Stacked-statement DROP attempt
+        ("sqli_drop_table",
+         r"(?i);\s*drop\s+(?:table|database)\b"),
+        # Role-switch / jailbreak openings
+        ("prompt_role_switch",
+         r"(?i)\b(?:ignore|disregard|forget)\b.{0,40}\b(?:previous|prior|above|system|all)\b.{0,40}\b(?:instruction|prompt|rule|message)s?"),
+        # Persona-swap attempts ("you are now a hacker", "you are an unrestricted AI")
+        ("prompt_jailbreak_persona",
+         r"(?i)\byou\s+are\s+(?:now\s+)?(?:an?\s+)?(?:hacker|unrestricted|jailbroken|dan\b|developer\s+mode|sudo\s+mode|root|admin\s+mode)"),
+        # Env / credential extraction via shell
+        ("env_extraction",
+         r"(?i)(?:\b(?:cat|head|tail|less|more|read|show|print(?:env)?)\b[^.\n]{0,40}\.env\b|\benv\s*\||\bprintenv\b)"),
+        # Any attempt to invoke sqlite from chat — the backend owns the DB
+        ("sqlite_direct",
+         r"(?i)\bsqlite3?\b"),
+        # Curl/wget against API endpoints (CLI bypass attempt)
+        ("api_bypass_attempt",
+         r"(?i)\b(?:curl|wget)\s+[^\s]*(?:api\.vaultre|api\.harcourts|/api/v1)"),
+    ]
+    for tag, pattern in rules:
+        _SUSPICIOUS_PATTERNS.append((tag, _re.compile(pattern)))
+
+
+def _log_suspicious_input(session_id: str, user_email: str, content: str) -> None:
+    """Emit a WARNING for each suspicious pattern matched in `content`.
+    Audit-only — never blocks. Lets you spot abuse trends post-hoc."""
+    _compile_suspicious_patterns()
+    sample = content[:300].replace("\n", " ")
+    for tag, regex in _SUSPICIOUS_PATTERNS:
+        if regex.search(content):
+            log.warning(
+                "suspicious input matched (%s) session=%s user=%s sample=%r",
+                tag, session_id, user_email, sample,
+            )
+
+
+def _first_name(name_or_email: str) -> str:
+    """Derive a display first name from whatever the WS layer hands us.
+
+    Accepts either an email ("elijah.mirandilla@harcourts.com.au") or a
+    freeform name string ("Elijah Mirandilla", "Sarah"). For emails: take
+    the local part, the first dot-segment, capitalise. For freeform: take
+    the first whitespace token and capitalise.
+
+    Returns empty string if the input is unusable — the system prompt
+    branches on truthy so an empty value just suppresses the greeting
+    line rather than producing "Hi ."
+    """
+    s = (name_or_email or "").strip()
+    if not s:
+        return ""
+    # Email shape: local@domain → take local
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    # Take everything up to the first separator (dot, underscore, space).
+    for sep in (".", "_", " "):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+            break
+    return s.capitalize() if s else ""
+
+
 def _summarise_tool_use(name: str | None, inp: dict | None) -> str:
     """Plain-English one-liner for a tool call. Drives the UI's activity
-    ticker so a tool-heavy turn shows ("Reading IMG_4001.jpeg", "Searching
-    VaultRE: 158 Preservation") instead of a static "Working…" spinner."""
+    ticker — what users see while Claude is mid-turn.
+
+    Rules of thumb:
+      - Speak about WHAT, never HOW. "Looking at files" not "Running ls".
+      - Use filenames only — strip directories. The user doesn't need to
+        see consultants/wendy-squibb/sessions/session-abc/photos/.
+      - Truncate long inputs.
+      - Never echo raw shell commands or paths back at the user.
+    """
     name = (name or "").lower()
     inp = inp or {}
+
+    def leaf(path: str) -> str:
+        """basename, robust to backslashes too."""
+        if not path:
+            return ""
+        return path.replace("\\", "/").rsplit("/", 1)[-1]
+
     if name == "read":
         path = inp.get("file_path") or inp.get("path") or ""
-        leaf = path.rsplit("/", 1)[-1] if path else ""
-        return f"Reading {leaf or path}"
+        return f"Reading {leaf(path) or 'a file'}"
     if name == "bash":
         cmd = (inp.get("command") or "").strip()
+        # VaultRE wrapper — first-class friendly summary.
         if cmd.startswith("./scripts/vaultre.sh"):
-            sub = cmd.split(" ", 1)[-1].strip()
-            return f"VaultRE: {sub[:80]}"
-        # First word is usually informative.
+            parts = cmd.split(None, 2)
+            sub = parts[1] if len(parts) > 1 else ""
+            arg = parts[2] if len(parts) > 2 else ""
+            # Strip quotes around the search term.
+            arg = arg.strip().strip("\"'")
+            if sub == "search":
+                return f"Searching VaultRE for {arg[:80]}" if arg else "Searching VaultRE"
+            if sub == "photos":
+                return "Looking up VaultRE photos"
+            if sub == "get":
+                return "Loading VaultRE property"
+            if sub == "download":
+                return "Downloading VaultRE photos"
+            return "Talking to VaultRE"
+        # Friendly verbs for common shell commands — never expose the
+        # command itself in the activity line.
         head = cmd.split(None, 1)[0] if cmd else ""
-        return f"Running {head}" if head else "Running command"
+        friendly = {
+            "ls": "Looking at files",
+            "find": "Searching for files",
+            "cat": "Reading a file",
+            "head": "Reading a file",
+            "tail": "Reading a file",
+            "less": "Reading a file",
+            "wc": "Counting things",
+            "mv": "Organising a file",
+            "cp": "Copying a file",
+            "mkdir": "Setting up folders",
+            "rmdir": "Tidying up",
+            "rm": "Cleaning up",
+            "echo": "Jotting something down",
+            "grep": "Searching for text",
+            "awk": "Processing some text",
+            "sed": "Processing some text",
+            "git": "Checking the workspace",
+            "python": "Running a script",
+            "python3": "Running a script",
+            "node": "Running a script",
+        }.get(head)
+        return friendly or "Working on it"
     if name == "write":
-        path = inp.get("file_path") or ""
-        return f"Writing {path.rsplit('/', 1)[-1] or path}"
+        return f"Saving {leaf(inp.get('file_path') or '') or 'a file'}"
     if name == "edit":
-        path = inp.get("file_path") or ""
-        return f"Editing {path.rsplit('/', 1)[-1] or path}"
+        return f"Updating {leaf(inp.get('file_path') or '') or 'a file'}"
     if name == "webfetch" or name == "web_fetch":
-        return f"Fetching {(inp.get('url') or '')[:80]}"
+        return "Checking the web"
     if name == "websearch" or name == "web_search":
-        return f"Searching the web: {(inp.get('query') or '')[:80]}"
+        q = (inp.get("query") or "")[:60]
+        return f"Searching the web for {q}" if q else "Searching the web"
     if name == "grep":
-        return f"Searching: {(inp.get('pattern') or '')[:80]}"
+        return "Searching for text"
     if name == "glob":
-        return f"Finding files: {(inp.get('pattern') or '')[:80]}"
+        return "Finding files"
     if name == "task" or name == "agent":
-        return "Delegating to a subagent"
-    # Unknown / future tools — show the tool name itself.
-    return (name.capitalize() if name else "Working") + "…"
+        return "Handing off to a helper"
+    # Unknown / future tools — graceful generic.
+    return "Working on it"
 
 
 def _recover_assistant_text_from_jsonl(claude_session_id: str) -> str:
@@ -208,6 +341,170 @@ def require_auth(
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
+# ---------------------------------------------------------------------------
+# Session-cleanup helpers (used by DELETE /api/sessions/{id} and its preview
+# endpoint). Kept here rather than in db.py because they touch the filesystem.
+# ---------------------------------------------------------------------------
+
+# Liberal match — same shape as the frontend chip-rendering regex so a
+# bare filename "saved as foo.docx" (the friendly form the system prompt
+# encourages) is counted as a session deliverable, not just the canonical
+# "outputs/foo.docx" form. The cross-session collision risk is mitigated
+# elsewhere: collection is restricted to ASSISTANT messages (user-typed
+# filenames don't count), and each candidate must actually exist under
+# outputs/ — so a mention without a corresponding file is a no-op.
+import re as _re_cleanup  # local alias — re is reused in suspicious-input logger
+
+_OUTPUTS_REF_RE = _re_cleanup.compile(
+    r"(?:outputs/)?([A-Za-z0-9][A-Za-z0-9._\-/]*\.(?:docx|pdf|csv|txt|md|jpe?g|png|webp))",
+    _re_cleanup.IGNORECASE,
+)
+
+
+def _collect_session_outputs(session_id: str) -> list[_Path]:
+    """Walk a session's ASSISTANT messages and return resolved Paths to
+    every output file the assistant mentioned that still exists in
+    `outputs/`.
+
+    Why assistant-only: the assistant is the only role that can actually
+    GENERATE a deliverable. Restricting attribution to assistant messages
+    means a user pasting a filename ("I have draft.docx on my desktop")
+    can't trigger another session's deliverable to be deleted.
+
+    Path-traversal defence: every match is resolved against the
+    `outputs/` root and discarded if it doesn't sit under it.
+    """
+    db = get_db()
+    messages = db.list_messages(session_id=session_id, limit=1000)
+
+    s = get_settings()
+    outputs_root = (s.project_root / "outputs").resolve()
+
+    seen: set[str] = set()
+    found: list[_Path] = []
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content") or ""
+        if not isinstance(content, str):
+            continue
+        for match in _OUTPUTS_REF_RE.finditer(content):
+            rel = match.group(1)
+            if rel in seen:
+                continue
+            seen.add(rel)
+            ext = _Path(rel).suffix.lower()
+            if ext not in DOWNLOADABLE_EXTENSIONS:
+                continue
+            candidate = (outputs_root / rel).resolve()
+            try:
+                candidate.relative_to(outputs_root)
+            except ValueError:
+                continue
+            if candidate.is_file():
+                found.append(candidate)
+    return found
+
+
+def _session_folder_candidates(
+    consultant_slug: str | None, session_id: str
+) -> list[_Path]:
+    """Return every folder under `consultants/{slug}/sessions/` that
+    belongs to this session.
+
+    Discovery order (first non-empty wins, so we don't double-attribute):
+      1. **Strict**: `session-{id[:8]}/` — the canonical convention
+         enforced by the uploads route and the system prompt.
+      2. **Time-based fallback**: any session folder whose contents'
+         mtime falls inside this session's active window. Catches
+         folders the assistant invented (e.g. when running
+         `vaultre.sh download <id> <some-other-name>`), which would
+         otherwise leak.
+
+    Time-based attribution risks attaching to the wrong session ONLY if
+    two sessions for the same consultant were active simultaneously and
+    one wrote into a folder during the other's window. With a single
+    operator (Wendy) on a single laptop, that doesn't happen.
+    """
+    if not consultant_slug:
+        return []
+    s = get_settings()
+    sessions_root = (
+        s.project_root / "consultants" / consultant_slug / "sessions"
+    ).resolve()
+    if not sessions_root.is_dir():
+        return []
+
+    # Strict path first.
+    strict = (sessions_root / f"session-{session_id[:8]}").resolve()
+    try:
+        strict.relative_to(sessions_root)
+    except ValueError:
+        strict = None  # type: ignore[assignment]
+    if strict and strict.is_dir():
+        return [strict]
+
+    # Fallback: time-based discovery.
+    db = get_db()
+    sess = db.get_session(session_id)
+    if not sess:
+        return []
+
+    import datetime as _dt
+
+    def _parse(ts: str | None) -> _dt.datetime | None:
+        if not ts:
+            return None
+        try:
+            iso = ts if "T" in ts else ts.replace(" ", "T") + "+00:00"
+            return _dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    started = _parse(sess.get("started_at"))
+    last = _parse(sess.get("last_active_at"))
+    if not started or not last:
+        return []
+    # 60-second slack on each side for clock skew between SQLite (CURRENT_TIMESTAMP)
+    # and filesystem mtime (kernel).
+    started_ts = started.timestamp() - 60
+    last_ts = last.timestamp() + 60
+
+    matched: list[_Path] = []
+    for folder in sessions_root.iterdir():
+        if not folder.is_dir():
+            continue
+        target = folder.resolve()
+        try:
+            target.relative_to(sessions_root)
+        except ValueError:
+            continue
+        # Folder is in-scope if ANY file inside it was modified during
+        # this session's window. We stop at the first match per folder.
+        for f in target.rglob("*"):
+            if not f.is_file():
+                continue
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            if started_ts <= mtime <= last_ts:
+                matched.append(target)
+                break
+    return matched
+
+
+def _count_session_uploads(consultant_slug: str | None, session_id: str) -> int:
+    """Count files recursively under any folder this session owns
+    (strict canonical name OR time-based fallback). 0 if nothing is
+    attributable.
+    """
+    total = 0
+    for folder in _session_folder_candidates(consultant_slug, session_id):
+        total += sum(1 for _ in folder.rglob("*") if _.is_file())
+    return total
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     """Public — needed by install.sh verify and basic monitoring. Does
@@ -244,6 +541,187 @@ def list_session_messages(
     return get_db().list_messages(session_id=session_id)
 
 
+@app.get("/api/sessions/{session_id}/cleanup-preview")
+def cleanup_preview(
+    session_id: str,
+    user: AuthedUser = Depends(require_auth),
+) -> dict:
+    """Non-destructive preview of what `DELETE /api/sessions/{id}` will
+    remove. The confirm modal calls this before showing "Delete this
+    session?" so the user can see exactly how many files are about to
+    be wiped — uploaded photos under the session folder, and any
+    deliverables (Word docs / images / PDFs) the session generated
+    under `outputs/`.
+
+    Same auth + ownership rules as DELETE: anyone authed can preview
+    their own session; in prod (non-dev-user) you can't preview
+    someone else's. Returns:
+
+        {
+          "session_id": "...",
+          "uploads": 5,                       # files under consultants/.../sessions/session-XX/
+          "deliverables": 1,                  # files under outputs/ referenced by this session
+          "deliverable_names": ["158.docx"],  # filenames only (no path) for the modal
+        }
+    """
+    db = get_db()
+    sess = db.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    # Same ownership check as delete_session — preview leaks file
+    # counts, which is mildly sensitive (a malicious user could probe
+    # other people's sessions for activity volume).
+    if (
+        user.sub != "dev-user"
+        and sess.get("user_name")
+        and sess["user_name"] != user.email
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="you can only preview your own sessions",
+        )
+
+    uploads = _count_session_uploads(sess.get("consultant_slug"), session_id)
+    output_paths = _collect_session_outputs(session_id)
+    return {
+        "session_id": session_id,
+        "uploads": uploads,
+        "deliverables": len(output_paths),
+        "deliverable_names": [p.name for p in output_paths],
+    }
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(
+    session_id: str,
+    user: AuthedUser = Depends(require_auth),
+) -> dict:
+    """Hard-delete a session: DB rows + on-disk session folder.
+
+    Ownership: in production (REQUIRE_AUTH=true, user.sub != 'dev-user')
+    we only allow the session's owner to delete it. user_name on the
+    session row is the email derived from the JWT at create time, so
+    the comparison is JWT-email vs stored email. In dev mode the auth
+    layer hands back the stub 'dev-user' identity and we skip the
+    ownership check — keeps local testing frictionless.
+
+    Cascade:
+      - sessions row + all messages → deleted by db.delete_session
+      - filesystem session folder → removed here (shutil.rmtree)
+      - outputs/<file> referenced in messages → unlinked here (was
+        previously kept; now we sweep them so "delete session" means
+        delete everything the session produced). Conservative regex
+        requires explicit `outputs/` prefix so a bare filename in chat
+        text can't accidentally trigger another session's deliverable.
+      - learnings → kept (durable voice rules, see db.delete_session)
+
+    Returns {"deleted": true, "session_id": "...",
+             "uploads_removed": N, "outputs_removed": M} on success;
+    404 if the session doesn't exist; 403 if the caller doesn't own it.
+    """
+    import shutil
+
+    db = get_db()
+    sess = db.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    # Collect referenced outputs BEFORE deleting messages — _collect
+    # reads message content to do the regex match. After
+    # db.delete_session() those rows are gone.
+    outputs_to_remove = _collect_session_outputs(session_id)
+
+    # Ownership check. Skipped for the dev-user stub so local testing
+    # without a real Supabase session continues to work.
+    if user.sub != "dev-user" and sess.get("user_name") and sess["user_name"] != user.email:
+        log.warning(
+            "delete_session refused: %s tried to delete session %s owned by %s",
+            user.email, session_id, sess["user_name"],
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="you can only delete your own sessions",
+        )
+
+    # Filesystem first — if any rmtree fails we abort before touching
+    # the DB so the on-disk + DB views stay consistent. Use the same
+    # discovery rule as the preview endpoint (strict canonical folder,
+    # then time-based fallback) so any folder the assistant invented
+    # — e.g. `session-20260526-211635-158-preservation-drive` from a
+    # vaultre.sh download — also gets cleaned up. Without the fallback
+    # the DB row goes away but the photos sit on disk forever.
+    slug = sess.get("consultant_slug")
+    folders_to_remove = _session_folder_candidates(slug, session_id)
+    for target in folders_to_remove:
+        try:
+            shutil.rmtree(target)
+            log.info("removed session folder %s", target)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("rmtree failed for %s: %s", target, exc)
+            raise HTTPException(
+                status_code=500,
+                detail=f"could not remove session folder: {exc}",
+            )
+
+    # Unlink each referenced output. Per-file failures are warnings, not
+    # 500s — folder wipe already succeeded, so partial-output cleanup is
+    # something the user can mop up manually from outputs/. Returning 500
+    # here would leave the DB row intact but the folder gone, which is
+    # worse than logging and moving on.
+    outputs_removed = 0
+    for path in outputs_to_remove:
+        try:
+            path.unlink()
+            outputs_removed += 1
+            log.info("removed output %s", path)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001 — log and continue
+            log.warning("could not unlink output %s: %s", path, exc)
+
+    deleted = db.delete_session(session_id)
+    log.info(
+        "delete_session: id=%s user=%s deleted=%s outputs_removed=%d",
+        session_id, user.email, deleted, outputs_removed,
+    )
+    return {
+        "deleted": deleted,
+        "session_id": session_id,
+        "outputs_removed": outputs_removed,
+    }
+
+
+# Extensions Claude can put in outputs/ and have the UI auto-render
+# a download chip for. Chosen for "safe to serve from a browser":
+#   - Document formats: .docx, .pdf, .csv, .txt, .md
+#   - Common image formats: .jpg, .jpeg, .png, .webp
+# Deliberately EXCLUDED:
+#   - .html, .svg → can carry inline scripts → XSS surface
+#   - .exe, .sh, .app, .dmg → executable formats
+# Add to this allow-list only after confirming the format can't be used
+# to inject script content or trick a browser into auto-executing.
+DOWNLOADABLE_EXTENSIONS = frozenset({
+    ".docx", ".pdf", ".csv", ".txt", ".md",
+    ".jpg", ".jpeg", ".png", ".webp",
+})
+
+# Content-Type per extension. Browsers infer this from the response,
+# but being explicit means iOS Safari doesn't second-guess a .docx as
+# text/plain (which it sometimes does on first download attempt).
+_MEDIA_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pdf":  "application/pdf",
+    ".csv":  "text/csv",
+    ".txt":  "text/plain",
+    ".md":   "text/markdown",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".webp": "image/webp",
+}
+
+
 @app.get("/api/outputs/{filename:path}")
 def download_output(
     filename: str,
@@ -251,34 +729,39 @@ def download_output(
 ) -> FileResponse:
     """Serve a generated artefact from outputs/ for download.
 
-    Phase 5 of the workflow writes the listing's Word doc into outputs/ —
-    users on their phones need a way to actually get the file. This route
-    lets the chat UI render a download button when an assistant message
-    references `outputs/<name>.docx`.
+    Workflow Phase 5 writes the listing's Word doc here; consultants can
+    also save images / PDFs they want the user to grab. This route is
+    the canonical "give me that file" endpoint — the chat UI auto-
+    renders a download chip whenever Claude mentions one of the
+    DOWNLOADABLE_EXTENSIONS by name in a reply.
 
     Hardening:
       - Path is resolved against settings.project_root / outputs and
-        rejected if it escapes (path-traversal defence). FastAPI's
-        `{filename:path}` lets `/` through in the URL — we explicitly
-        re-resolve and check.
-      - Only `.docx` for now. If we later generate PDFs etc., widen the
-        suffix allowlist; do not remove it.
+        rejected if it escapes (path-traversal defence).
+      - File extension must be in the allow-list (no arbitrary
+        executable / scriptable formats served).
+      - Only files that actually exist return 200; otherwise 404 with
+        no information about adjacent files.
     """
     s = get_settings()
     outputs_root = (s.project_root / "outputs").resolve()
     target = (outputs_root / filename).resolve()
     if not str(target).startswith(str(outputs_root) + "/") and target != outputs_root:
         raise HTTPException(status_code=400, detail="invalid path")
-    if target.suffix.lower() != ".docx":
-        raise HTTPException(status_code=400, detail="only .docx downloads are allowed")
+    suffix = target.suffix.lower()
+    if suffix not in DOWNLOADABLE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"file type {suffix or '(none)'} isn't downloadable. "
+                "Allowed: " + ", ".join(sorted(DOWNLOADABLE_EXTENSIONS))
+            ),
+        )
     if not target.is_file():
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(
         path=target,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument."
-            "wordprocessingml.document"
-        ),
+        media_type=_MEDIA_TYPES.get(suffix, "application/octet-stream"),
         filename=target.name,
         headers={
             "Content-Disposition": f'attachment; filename="{target.name}"',
@@ -379,6 +862,21 @@ async def chat_ws(websocket: WebSocket) -> None:
             user_name = authed.email if authed.sub != "dev-user" else (
                 (msg.get("user_name") or authed.email).strip() or authed.email
             )
+            # First-name for the consultant to greet by. Derived from the
+            # email's local part, dot-segment one. "elijah.mirandilla@…"
+            # becomes "Elijah". If the user_name doesn't look like an
+            # email (dev-mode, freeform name typed in name-prompt), we
+            # take the whole string and titlecase its first token.
+            user_first_name = _first_name(user_name)
+            # Audit-only: log obvious injection / prompt-jailbreak patterns
+            # so we can see attempted abuse later. The system prompt is
+            # what shapes Claude's response; this is purely visibility.
+            # Read session_id directly from the inbound msg rather than
+            # the local var assigned later — keeps the audit log close
+            # to where content is parsed and avoids the ordering bug.
+            _log_suspicious_input(
+                msg.get("session_id") or "<new>", authed.email, content,
+            )
             resume_id = msg.get("claude_session_id") or None
             session_id = msg.get("session_id") or None
 
@@ -456,25 +954,41 @@ async def chat_ws(websocket: WebSocket) -> None:
                     consultant_folder=folder,
                     resume_session_id=resume_id,
                     claude_bin=settings.claude_bin,
+                    user_first_name=user_first_name,
                 ):
                     if isinstance(ev, StreamSummary):
-                        # Safety net: if no text-bearing event populated
-                        # assistant_text (e.g. an unusual stream-json shape
-                        # for image-heavy turns), fall back to reading
-                        # Claude Code's own session jsonl. That file is
-                        # what `--resume` reads next turn, so it's the
-                        # canonical source of truth.
-                        if not assistant_text.strip() and ev.session_id:
-                            assistant_text = (
-                                _recover_assistant_text_from_jsonl(ev.session_id)
-                                or assistant_text
+                        # Safety net: fall back to Claude Code's own session
+                        # jsonl whenever the in-memory `assistant_text` is
+                        # either empty OR materially shorter than what
+                        # Claude actually wrote. The jsonl is what
+                        # `--resume` reads next turn, so it's the canonical
+                        # record. Why "materially shorter": Claude can
+                        # interleave text → tool_use → more_text in a
+                        # single turn; if our parser missed the post-tool
+                        # text block, SQLite would persist only the
+                        # placeholder pre-tool text ("let me take a
+                        # look...") while the actual analysis sits in the
+                        # jsonl. Trust the longer source.
+                        if ev.session_id:
+                            jsonl_text = _recover_assistant_text_from_jsonl(
+                                ev.session_id
                             )
-                            if assistant_text.strip():
+                            current_len = len(assistant_text.strip())
+                            jsonl_len = len(jsonl_text.strip())
+                            # Only swap in jsonl if (a) we have nothing,
+                            # or (b) jsonl is meaningfully longer (>100
+                            # chars more) — guards against trivial trailing
+                            # whitespace differences flipping back and forth.
+                            if jsonl_text and (
+                                current_len == 0
+                                or jsonl_len > current_len + 100
+                            ):
                                 log.info(
-                                    "recovered assistant text from claude jsonl "
-                                    "(%d chars) for session=%s",
-                                    len(assistant_text), session_id,
+                                    "swapping assistant text: in-memory=%d chars, "
+                                    "jsonl=%d chars, session=%s",
+                                    current_len, jsonl_len, session_id,
                                 )
+                                assistant_text = jsonl_text
                                 # Emit the recovered text as a synthetic chunk
                                 # so the frontend's live assistant bubble
                                 # actually shows the reply. Without this, the
@@ -494,7 +1008,7 @@ async def chat_ws(websocket: WebSocket) -> None:
                                         "session_id": ev.session_id,
                                     }
                                 )
-                            else:
+                            elif current_len == 0 and jsonl_len == 0:
                                 log.warning(
                                     "assistant_text empty after stream + jsonl "
                                     "fallback for session=%s claude=%s",
