@@ -309,6 +309,7 @@ app.add_middleware(
         r"|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}"
         r"|[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net"
         r"|[a-z0-9-]+\.vercel\.app"  # HUP-Sales-App on Vercel
+        r"|[a-z0-9-]+\.hup\.net\.au"  # Production HUP-Sales-App (salesapp.hup.net.au + future subdomains)
         r")(:\d+)?$"
     ),
     # Allow credentials so the browser can send the Authorization header

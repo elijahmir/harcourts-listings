@@ -34,10 +34,18 @@ export function configureAuth(
   _getAccessToken = getAccessToken;
 }
 
+// ngrok free-tier serves an HTML interstitial ("ERR_NGROK_6024") whenever a
+// browser hits the tunnel without this header. Without it, the JSON fetch
+// returns HTML, json.consultants is undefined → "No consultants" in the UI.
+// Safe to send unconditionally — non-ngrok hosts ignore it.
+const NGROK_HEADER = { "ngrok-skip-browser-warning": "true" } as const;
+
 async function authHeaders(): Promise<HeadersInit> {
-  if (!_getAccessToken) return {};
+  if (!_getAccessToken) return { ...NGROK_HEADER };
   const token = await _getAccessToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return token
+    ? { Authorization: `Bearer ${token}`, ...NGROK_HEADER }
+    : { ...NGROK_HEADER };
 }
 
 async function bearerSubprotocol(): Promise<string | null> {
@@ -595,8 +603,12 @@ export async function fetchSessionMessages(
 // --- REST helpers ----------------------------------------------------------
 
 export async function fetchConsultants(backendUrl: string): Promise<string[]> {
+  // /healthz is public so we don't need authHeaders(), but we still need the
+  // ngrok-skip-browser-warning header (see authHeaders comment) otherwise the
+  // browser request gets ngrok's HTML interstitial and JSON.parse fails.
   const res = await fetch(`${backendUrl.replace(/\/$/, "")}/healthz`, {
     cache: "no-store",
+    headers: NGROK_HEADER,
   });
   if (!res.ok) throw new Error(`healthz returned ${res.status}`);
   const json = (await res.json()) as { consultants?: string[] };
