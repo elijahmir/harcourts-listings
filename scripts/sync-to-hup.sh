@@ -44,6 +44,8 @@ mkdir -p "$DST/lib"
 # the HUP side imports from `./lib/ws` and `./` so paths stay stable.
 FILES=(
   "components/chat.tsx"
+  "components/avatar-circle.tsx"
+  "components/confirm-dialog.tsx"
   "components/session-picker.tsx"
   "components/save-learning-form.tsx"
   "components/upload-button.tsx"
@@ -55,7 +57,13 @@ LIB_FILES=(
   "lib/ws.ts"
   "lib/utils.ts"
   "lib/storage.ts"
+  "lib/avatars.ts"
 )
+
+# Public assets (avatars). Mirrored into HUP's /public/avatars so the
+# <img src="/avatars/Wendy.png"> URLs resolve identically on both surfaces.
+PUBLIC_DIR_SRC="$SRC_ROOT/apps/web/public/avatars"
+PUBLIC_DIR_DST="$DST_ROOT/public/avatars"
 
 for f in "${FILES[@]}"; do
   src="$SRC_ROOT/apps/web/src/$f"
@@ -82,14 +90,58 @@ for f in "${LIB_FILES[@]}"; do
   fi
 done
 
+# Mirror /public/avatars so the slug→/avatars/<Name>.png lookups resolve
+# in HUP-Sales-App too. Whole-directory sync — extra avatars don't hurt,
+# they're just unused PNGs.
+if [[ -d "$PUBLIC_DIR_SRC" ]]; then
+  mkdir -p "$PUBLIC_DIR_DST"
+  rsync -a $DRY_RUN "$PUBLIC_DIR_SRC/" "$PUBLIC_DIR_DST/"
+  echo "  ✓ /public/avatars/ (rsynced)"
+fi
+
+# Rewrite @/-style imports → relative paths. harcourts-listings uses
+# @/components/* and @/lib/* aliases that resolve at apps/web/src;
+# HUP-Sales-App's tsconfig also uses @/* but mapped to ./src/* — so an
+# @/components/save-learning-form here points at src/components/, not
+# the harcourts-chat folder. We keep the imports relative so this
+# rewrite is mechanical and never wrong. index.tsx is the adapter and
+# uses @/lib/supabase/client legitimately — we skip it.
+if [[ -z "$DRY_RUN" ]]; then
+  echo "  → rewriting @/ imports to relative paths…"
+  cd "$DST"
+  python3 - <<'PYEOF'
+import re
+from pathlib import Path
+
+RULES = [
+    (r'from "@/components/avatar-circle"',      'from "./avatar-circle"'),
+    (r'from "@/components/confirm-dialog"',     'from "./confirm-dialog"'),
+    (r'from "@/components/save-learning-form"', 'from "./save-learning-form"'),
+    (r'from "@/components/session-picker"',     'from "./session-picker"'),
+    (r'from "@/components/upload-button"',      'from "./upload-button"'),
+    (r'from "@/components/ui/button"',          'from "./button"'),
+    (r'from "@/components/ui/input"',           'from "./input"'),
+    (r'from "@/lib/avatars"',                   'from "./lib/avatars"'),
+    (r'from "@/lib/ws"',                        'from "./lib/ws"'),
+    (r'from "@/lib/utils"',                     'from "./lib/utils"'),
+    (r'from "@/lib/storage"',                   'from "./lib/storage"'),
+]
+for f in list(Path(".").glob("*.tsx")) + list(Path("./lib").glob("*.ts")):
+    if f.name == "index.tsx":
+        continue
+    text = orig = f.read_text()
+    for pat, repl in RULES:
+        text = re.sub(pat, repl, text)
+    if text != orig:
+        f.write_text(text)
+        print(f"     ↪ {f}")
+PYEOF
+fi
+
 echo
 echo "Synced into $DST"
 echo
 echo "Next:"
 echo "  1. cd $DST_ROOT"
-echo "  2. Adjust import paths if HUP-Sales-App uses a different @/ alias"
-echo "     (the harcourts-listings repo uses @/components/* and @/lib/* —"
-echo "      after sync, files reference './session-picker' etc. directly,"
-echo "      but the cn() helper still imports from ./lib/utils)"
-echo "  3. npm run build  # verify TypeScript compiles in the new context"
-echo "  4. Commit + push for Vercel to rebuild"
+echo "  2. npm run build  # verify TypeScript compiles"
+echo "  3. Commit + push for Vercel to rebuild"
