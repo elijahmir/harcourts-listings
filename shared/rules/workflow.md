@@ -144,6 +144,35 @@ Generate all four pieces per shared/rules/content-formats.md based on the approv
 
 Present them together. Ask: "Approve all ancillary content, or tell me what to change."
 
-## Phase 5 — Compile the Word document
+## Phase 5 — Hand the listing off to the user
 
-Once everything is approved, generate a Word document at outputs/{YYYY-MM-DD}_{consultant-slug}_{address-slug}.docx per shared/rules/word-doc-spec.md. Tell the user where it has been saved. Stop.
+Once Phase 4 is approved, do NOT auto-generate a Word document. The Word document is now an on-demand export, not a default step. Instead:
+
+1. Present a single consolidated assistant message containing the final listing in this exact shape, so the Sales App can parse it and the user can save it to the listings repo with one click:
+
+       **Address:** {full address}
+
+       **Headline:** {scroll-stopping heading}
+
+       ## Listing
+       {Listing body, over 500 words, with the call-to-action and disclaimer per Phase 3.}
+
+       ## Brochure Text
+       {Listing without disclaimer.}
+
+       ## Window Card
+       {3 dot points, 20 words each.}
+
+       ## RealEstateVIEW Guide
+       {5 dot points, 14 words each.}
+
+       ## Social Media Caption
+       {50–150 words, emojis, uses the 5 dot points.}
+
+2. End the message with this exact prompt to the user, on its own line:
+
+       Tap "Save as listing" below to add this to your listings repo, or tell me what to change.
+
+3. STOP. Do not generate the .docx file unless the user explicitly asks ("give me the Word doc", "export as docx", "send the .docx").
+
+If the user later asks for a Word document, generate it at outputs/{YYYY-MM-DD}_{consultant-slug}_{address-slug}.docx per shared/rules/word-doc-spec.md and mention the filename so the chat's download chip renders. The saved listing in Supabase is the source of truth; the .docx is a downstream export.
