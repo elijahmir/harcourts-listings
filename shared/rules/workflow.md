@@ -64,6 +64,39 @@ When the VaultRE integration is wired in (see ROADMAP.md and integrations/vaultr
 
 Tell the user: "Files received. Preparing the Sales Agent Briefing now."
 
+### Image analysis — parallel subagents for sets of >10 photos
+
+Before writing the briefing, you need to look at every image. The naive approach is to Read them one after another. For sets larger than ~10 photos, that breaks: 30+ Reads in a single turn burn ~60K tokens, cause attention fatigue, and any one decode failure can derail the whole turn.
+
+Instead, dispatch parallel Task subagents:
+
+1. **List the image files** in the session folder (use Bash `ls` or `find` — do NOT Read them yourself yet).
+2. **Read the floor plan(s) directly.** You keep those in your own context for cross-reference with room counts you mention later. Floor plans rarely number more than 2 and they're too important to summarise via a subagent.
+3. **Batch the photos** into groups of 5–8. A 30-photo set becomes 4–6 batches.
+4. **Dispatch one Task subagent per batch IN A SINGLE assistant message.** Multiple `tool_use` blocks in one message run concurrently — that's where the parallelism comes from. Use `subagent_type: general-purpose`.
+
+   Per-subagent prompt template:
+
+       Open each of these N image files and return one JSON line per file in this exact shape:
+
+           {"file":"<filename>","kind":"<interior|exterior|aerial|floor_plan|contract|other>","rooms":[<list of room types visible>],"features":[<3-5 distinctive features>],"notes":"<1 sentence overall impression>"}
+
+       End with a JSON array combining all lines. Do not read any other files. Do not ask follow-up questions; just return the JSON.
+
+       Files:
+       - <full path 1>
+       - <full path 2>
+       - ...
+
+5. **Merge results.** Each subagent returns ~200–300 tokens. You receive 4–6 of these, dedupe duplicate room mentions, group features by area, and build your single mental model of the property.
+6. **Retry only failed batches.** If one subagent times out or returns malformed JSON, re-dispatch that batch alone — do not redo successful ones.
+
+Build the rest of Phase 2 from the merged JSON + the floor plan(s) you read directly. **Do not re-Read the photos yourself after the subagents complete** — that defeats the purpose.
+
+For small image sets (10 or fewer), reading sequentially is fine — the dispatch overhead isn't worth it.
+
+### Briefing content
+
 Review the address and all materials. For each of these areas, write what you find or explicitly state that the information is not available:
 
 - Property type and any research-worthy facts about the address
