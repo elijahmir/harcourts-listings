@@ -681,6 +681,101 @@ export async function uploadFiles(
   return (await res.json()) as UploadedFile[];
 }
 
+/** Per-byte progress event surfaced to the caller during a batch upload. */
+export interface UploadProgress {
+  bytesLoaded: number;
+  bytesTotal: number;
+}
+
+/**
+ * Variant of uploadFiles that surfaces real upload-progress events to a
+ * callback. Used by the chat UI so a teammate uploading a 50 MB phone
+ * photo sees a progress bar fill instead of staring at a frozen
+ * paperclip for 30 seconds.
+ *
+ * Implemented on XMLHttpRequest because the browser fetch() API still
+ * does not expose request-body progress (only response progress).
+ * Streams API write-side is shipping in some browsers but not all yet.
+ * XHR is the boring, portable, ten-year-supported way to do this.
+ *
+ * onProgress is called many times during the upload (browser-controlled
+ * cadence, typically every 50-100ms or every few hundred KB). Caller
+ * should patch component state from inside it.
+ */
+export function uploadFilesWithProgress(
+  backendUrl: string,
+  sessionId: string,
+  files: File[],
+  onProgress: (p: UploadProgress) => void,
+): Promise<UploadedFile[]> {
+  return new Promise<UploadedFile[]>((resolve, reject) => {
+    // Build the multipart body the same way fetch() would.
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f, f.name);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "POST",
+      `${backendUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/upload`,
+    );
+
+    // Resolve auth + ngrok headers BEFORE send (xhr.send is sync from
+    // here on so we can't await mid-stream). We attach them to the
+    // request via setRequestHeader once authHeaders() resolves.
+    authHeaders()
+      .then((hdrs) => {
+        const entries =
+          hdrs instanceof Headers
+            ? Array.from(hdrs.entries())
+            : Object.entries(hdrs as Record<string, string>);
+        for (const [k, v] of entries) {
+          if (v != null) xhr.setRequestHeader(k, v);
+        }
+
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable) {
+            onProgress({ bytesLoaded: ev.loaded, bytesTotal: ev.total });
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText) as UploadedFile[]);
+            } catch (e) {
+              reject(
+                new Error(
+                  `upload parse error: ${
+                    e instanceof Error ? e.message : String(e)
+                  }`,
+                ),
+              );
+            }
+            return;
+          }
+          // Try to surface the backend's detail message.
+          let detail = "";
+          try {
+            const body = JSON.parse(xhr.responseText) as { detail?: string };
+            detail = body.detail || "";
+          } catch {
+            detail = xhr.responseText.slice(0, 200);
+          }
+          reject(
+            new Error(
+              `upload ${xhr.status}: ${detail || xhr.statusText || "failed"}`,
+            ),
+          );
+        };
+        xhr.onerror = () =>
+          reject(new Error("upload network error"));
+        xhr.ontimeout = () => reject(new Error("upload timed out"));
+
+        xhr.send(fd);
+      })
+      .catch(reject);
+  });
+}
+
 /**
  * Download a generated deliverable (`outputs/<filename>`) and trigger a
  * native save dialog in the user's browser.

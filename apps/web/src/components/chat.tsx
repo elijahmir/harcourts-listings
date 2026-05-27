@@ -20,7 +20,7 @@ import {
   fetchConsultants,
   fetchSessionMessages,
   saveLearning,
-  uploadFiles,
+  uploadFilesWithProgress,
   useChat,
   type ChatMessage,
   type ConnectionStatus,
@@ -152,6 +152,22 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
     useState<string | null>(null);
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Pending uploads: rendered as progress chips next to the input the
+  // instant a teammate picks files, so they get immediate feedback that
+  // the upload is happening (instead of staring at a frozen paperclip
+  // for 30+ seconds on a big photo). Each entry covers one batch; on
+  // success the entry is removed and its files appear in `uploads`.
+  // On failure the entry stays around (status:'error') with the
+  // backend's message so the user knows what went wrong + can dismiss.
+  interface PendingUpload {
+    id: string;
+    filenames: string[];
+    bytesLoaded: number;
+    bytesTotal: number;
+    status: "uploading" | "error";
+    error?: string;
+  }
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const [savedLearningMessageIds, setSavedLearningMessageIds] = useState<
     Set<string>
   >(new Set());
@@ -352,6 +368,7 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
     setSessionIdState(sid);
     setInitialClaudeSessionId(getClaudeSessionId(next));
     setUploads([]);
+    setPendingUploads([]);
     setSavedLearningMessageIds(new Set());
     setEditingLearningForId(null);
     replayedForRef.current = null; // allow history replay for the new consultant
@@ -366,6 +383,7 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
     setSessionIdState(null);
     setInitialClaudeSessionId(null);
     setUploads([]);
+    setPendingUploads([]);
     setSavedLearningMessageIds(new Set());
     setEditingLearningForId(null);
     replayedForRef.current = null;
@@ -380,6 +398,7 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
     setInitialSessionId(s.id);
     setInitialClaudeSessionId(s.claude_session_id);
     setUploads([]);
+    setPendingUploads([]);
     setSavedLearningMessageIds(new Set());
     setEditingLearningForId(null);
     replayedForRef.current = null; // force history replay
@@ -413,6 +432,7 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
     send({ content: composed });
     setDraft("");
     setUploads([]); // consumed — next message starts a fresh attachment list
+    setPendingUploads([]);
   }
 
   async function handleFiles(files: File[]) {
@@ -423,12 +443,55 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
       return;
     }
     setUploadError(null);
+
+    // Stamp this batch with an id so we can patch its progress entry
+    // without confusing it with sibling batches if the user picks files
+    // twice in quick succession.
+    const id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `pend-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const bytesTotal = files.reduce((sum, f) => sum + f.size, 0);
+    const filenames = files.map((f) => f.name);
+    setPendingUploads((prev) => [
+      ...prev,
+      { id, filenames, bytesLoaded: 0, bytesTotal, status: "uploading" },
+    ]);
+
     try {
-      const uploaded = await uploadFiles(backendUrl, sessionId, files);
+      const uploaded = await uploadFilesWithProgress(
+        backendUrl,
+        sessionId,
+        files,
+        ({ bytesLoaded, bytesTotal: total }) => {
+          setPendingUploads((prev) =>
+            prev.map((p) =>
+              p.id === id
+                ? { ...p, bytesLoaded, bytesTotal: total || p.bytesTotal }
+                : p,
+            ),
+          );
+        },
+      );
+      // Success: remove the pending entry, promote its files into the
+      // canonical `uploads` list that the send-handler will read.
+      setPendingUploads((prev) => prev.filter((p) => p.id !== id));
       setUploads((prev) => [...prev, ...uploaded]);
     } catch (err) {
-      setUploadError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      // Leave the chip on screen so the user can read the error +
+      // dismiss it when they're ready. Don't move into the global
+      // uploadError banner because per-batch messaging is clearer.
+      setPendingUploads((prev) =>
+        prev.map((p) =>
+          p.id === id ? { ...p, status: "error", error: message } : p,
+        ),
+      );
     }
+  }
+
+  function dismissPendingUpload(id: string) {
+    setPendingUploads((prev) => prev.filter((p) => p.id !== id));
   }
 
   function removeUpload(stored: string) {
@@ -544,9 +607,88 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
           tricks needed. */}
       <footer className="shrink-0 border-t bg-background/95 backdrop-blur">
         <div className="mx-auto w-full max-w-5xl space-y-2 p-4">
-          {(uploads.length > 0 || uploadError) && (
+          {(uploads.length > 0 ||
+            uploadError ||
+            pendingUploads.length > 0) && (
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center gap-2">
+                {/* In-flight progress chips. One per batch the user
+                    picked. Bar fills as bytes leave the browser. */}
+                {pendingUploads.map((p) => {
+                  const pct =
+                    p.bytesTotal > 0
+                      ? Math.min(
+                          100,
+                          Math.round((p.bytesLoaded / p.bytesTotal) * 100),
+                        )
+                      : 0;
+                  const isError = p.status === "error";
+                  const label =
+                    p.filenames.length === 1
+                      ? p.filenames[0]
+                      : `${p.filenames.length} files`;
+                  return (
+                    <span
+                      key={p.id}
+                      className={cn(
+                        "inline-flex max-w-[260px] flex-col gap-1 rounded-md border px-2.5 py-1.5 text-xs",
+                        isError
+                          ? "border-destructive/40 bg-destructive/5 text-destructive"
+                          : "bg-muted",
+                      )}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="max-w-[180px] truncate">{label}</span>
+                        <span
+                          className={cn(
+                            "shrink-0 font-mono text-[10px]",
+                            isError
+                              ? "text-destructive/80"
+                              : "text-muted-foreground",
+                          )}
+                        >
+                          {isError ? "failed" : `${pct}%`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => dismissPendingUpload(p.id)}
+                          className={cn(
+                            "ml-auto",
+                            isError
+                              ? "text-destructive/70 hover:text-destructive"
+                              : "text-muted-foreground hover:text-foreground",
+                          )}
+                          aria-label={
+                            isError
+                              ? `Dismiss failed upload`
+                              : `Cancel upload of ${label}`
+                          }
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                      {/* Thin progress bar. Hidden on error. */}
+                      {!isError && (
+                        <span className="block h-1 w-full overflow-hidden rounded-full bg-foreground/10">
+                          <span
+                            className="block h-full rounded-full bg-primary transition-all duration-200 ease-out"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </span>
+                      )}
+                      {isError && p.error && (
+                        <span className="block text-[10px] leading-snug">
+                          {p.error}
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+
+                {/* Successfully uploaded chips (what the next send-message
+                    will attach to the chat). */}
                 {uploads.map((u) => (
                   <span
                     key={u.stored_filename}
