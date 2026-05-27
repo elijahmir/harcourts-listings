@@ -171,13 +171,32 @@ class Database:
             self._conn.commit()
 
     def list_sessions(
-        self, *, consultant_slug: str | None = None, limit: int = 50
+        self,
+        *,
+        consultant_slug: str | None = None,
+        user_name: str | None = None,
+        limit: int = 50,
     ) -> list[dict[str, Any]]:
+        """List sessions, optionally filtered by consultant and/or owner.
+
+        `user_name` is the email of the session creator (matches the
+        `user_name` column populated from the Supabase JWT at create
+        time). When passed, only sessions belonging to that user come
+        back — that's how the API layer prevents one teammate from
+        seeing another's chats. Passing `None` returns every session
+        (used by the dev-user "admin" view).
+        """
         sql = "SELECT * FROM sessions"
+        clauses: list[str] = []
         params: list[Any] = []
         if consultant_slug:
-            sql += " WHERE consultant_slug = ?"
+            clauses.append("consultant_slug = ?")
             params.append(consultant_slug)
+        if user_name:
+            clauses.append("user_name = ?")
+            params.append(user_name)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY last_active_at DESC LIMIT ?"
         params.append(limit)
         with self._lock:

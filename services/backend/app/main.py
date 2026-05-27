@@ -524,22 +524,46 @@ def healthz() -> dict:
 def list_sessions(
     consultant_slug: str | None = None,
     limit: int = 50,
-    _user: AuthedUser = Depends(require_auth),
+    user: AuthedUser = Depends(require_auth),
 ) -> list[dict]:
-    """List recent sessions, optionally filtered by consultant. Used by the
-    frontend's sidebar (when one ships)."""
-    return get_db().list_sessions(consultant_slug=consultant_slug, limit=limit)
+    """List sessions for the History dropdown. Returns only the caller's
+    own sessions in prod mode — closes the IDOR where any teammate could
+    see every other teammate's chats by listing this endpoint. The
+    dev-user stub (HARCOURTS_REQUIRE_AUTH=false) sees everything, which
+    is what local debugging needs.
+    """
+    db = get_db()
+    if user.sub == "dev-user":
+        return db.list_sessions(consultant_slug=consultant_slug, limit=limit)
+    return db.list_sessions(
+        consultant_slug=consultant_slug, user_name=user.email, limit=limit,
+    )
 
 
 @app.get("/api/sessions/{session_id}/messages")
 def list_session_messages(
     session_id: str,
-    _user: AuthedUser = Depends(require_auth),
+    user: AuthedUser = Depends(require_auth),
 ) -> list[dict]:
-    """Replay a session's message history. Used when a user reopens a session."""
-    if not get_db().get_session(session_id):
+    """Replay a session's chat history. Owner-only in prod mode (the
+    list endpoint already hides other-users' sessions, but a teammate
+    who memorised a session id could still read it without this check)."""
+    db = get_db()
+    sess = db.get_session(session_id)
+    if not sess:
         return []
-    return get_db().list_messages(session_id=session_id)
+    # Dev-user gets the original any-session view. Real users must own
+    # the session; otherwise pretend it doesn't exist (404-equivalent
+    # by returning []) rather than 403 — leaking the existence of
+    # someone else's session by error code is mildly worse than just
+    # showing nothing.
+    if user.sub != "dev-user" and sess.get("user_name") != user.email:
+        log.warning(
+            "list_session_messages refused: %s tried to read session %s "
+            "owned by %s", user.email, session_id, sess.get("user_name"),
+        )
+        return []
+    return db.list_messages(session_id=session_id)
 
 
 @app.get("/api/sessions/{session_id}/cleanup-preview")
@@ -726,7 +750,7 @@ _MEDIA_TYPES = {
 @app.get("/api/outputs/{filename:path}")
 def download_output(
     filename: str,
-    _user: AuthedUser = Depends(require_auth),
+    user: AuthedUser = Depends(require_auth),
 ) -> FileResponse:
     """Serve a generated artefact from outputs/ for download.
 
@@ -743,6 +767,10 @@ def download_output(
         executable / scriptable formats served).
       - Only files that actually exist return 200; otherwise 404 with
         no information about adjacent files.
+      - Ownership: in prod mode, the filename must be referenced in one
+        of the caller's own session messages. Prevents a teammate who
+        guessed or shoulder-surfed another teammate's filename from
+        grabbing the document. Dev-user bypasses for local debugging.
     """
     s = get_settings()
     outputs_root = (s.project_root / "outputs").resolve()
@@ -760,6 +788,27 @@ def download_output(
         )
     if not target.is_file():
         raise HTTPException(status_code=404, detail="not found")
+
+    # Ownership gate: confirm THIS user has a session that references
+    # this filename. _collect_session_outputs reads assistant messages
+    # per session id and regex-extracts outputs/<file> mentions; we
+    # iterate the caller's sessions and check membership.
+    if user.sub != "dev-user":
+        db = get_db()
+        owns_it = False
+        for sess in db.list_sessions(user_name=user.email, limit=500):
+            paths = _collect_session_outputs(sess["id"])
+            if any(p.resolve() == target for p in paths):
+                owns_it = True
+                break
+        if not owns_it:
+            log.warning(
+                "download_output refused: %s tried to grab %s — not in their sessions",
+                user.email, filename,
+            )
+            # 404 not 403: don't leak that the file exists for someone else.
+            raise HTTPException(status_code=404, detail="not found")
+
     return FileResponse(
         path=target,
         media_type=_MEDIA_TYPES.get(suffix, "application/octet-stream"),
