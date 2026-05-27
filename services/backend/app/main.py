@@ -1069,16 +1069,33 @@ async def chat_ws(websocket: WebSocket) -> None:
                 nonlocal current_block_text, blocks_committed
                 text = current_block_text.strip()
                 if not text:
+                    log.info(
+                        "flush_block skipped (empty): session=%s final=%s blocks_committed=%d",
+                        session_id, final, blocks_committed,
+                    )
                     return
-                row_id = db.insert_message(
-                    session_id=session_id,
-                    role="assistant",
-                    content=text,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost_usd,
-                )
+                try:
+                    row_id = db.insert_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=text,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost_usd=cost_usd,
+                    )
+                except Exception as exc:  # noqa: BLE001 — log + re-raise
+                    log.exception(
+                        "flush_block INSERT failed: session=%s final=%s "
+                        "len=%d err=%s",
+                        session_id, final, len(text), exc,
+                    )
+                    raise
                 blocks_committed += 1
+                log.info(
+                    "flush_block committed: session=%s final=%s row=%d "
+                    "len=%d blocks_committed=%d",
+                    session_id, final, row_id, len(text), blocks_committed,
+                )
                 if not final:
                     # Tell the frontend to seal the current live bubble
                     # and spawn a fresh placeholder for the next text.
@@ -1138,6 +1155,14 @@ async def chat_ws(websocket: WebSocket) -> None:
 
                         # Flush the LAST block — this one carries the
                         # turn's token + cost on its row.
+                        log.info(
+                            "StreamSummary received: session=%s "
+                            "current_block_text_len=%d blocks_committed=%d "
+                            "input_tokens=%s output_tokens=%s",
+                            session_id, len(current_block_text),
+                            blocks_committed, ev.input_tokens,
+                            ev.output_tokens,
+                        )
                         await flush_block(
                             final=True,
                             input_tokens=ev.input_tokens,

@@ -272,6 +272,44 @@ def _chat_ui_context(consultant_slug: str, user_first_name: str = "") -> str:
         "the developer — the deletion is identical from the UI and the "
         "audit trail is cleaner.\n"
         ""
+        "MANY-IMAGE ANALYSIS — non-negotiable. Whenever you have MORE "
+        "than ~10 images to look at (e.g. a full VaultRE photo set, "
+        "consultant uploads after a paperclip burst), do NOT Read them "
+        "sequentially yourself. Reading 30+ images in a single turn is "
+        "fragile: each Read pulls ~2K tokens, the cumulative context "
+        "fatigue degrades your analysis quality, AND one decode hiccup "
+        "(corrupt JPEG / HEIC) can derail the whole turn. Instead, "
+        "dispatch PARALLEL subagents via the Task tool — each handles "
+        "a small batch, returns a structured JSON summary, then YOU "
+        "synthesise.\n\n"
+        "  Concrete pattern:\n"
+        "  1. List the image filenames. Group them into batches of "
+        "     5–8 images each (so 35 photos = ~5 batches).\n"
+        "  2. Dispatch one Task subagent per batch IN A SINGLE turn "
+        "     (multiple tool_use blocks in one assistant message → "
+        "     they run in parallel). Use subagent_type='general-purpose' "
+        "     or 'Explore' if available.\n"
+        "  3. Each subagent's prompt: 'Open each of these N images. For "
+        "     each one, return one JSON line: {\"file\":\"<filename>\","
+        "\"kind\":\"<interior|exterior|floor_plan|aerial|other>\","
+        "\"rooms\":[<list>],\"features\":[<3-5 distinctive features>],"
+        "\"notes\":\"<1 sentence overall impression>\"}. End with a "
+        "JSON array merging all lines. Do not read any other files.'\n"
+        "  4. Receive all subagent reports. Merge into your single "
+        "     mental model. Build Phase 2 briefing / Phase 3 listing "
+        "     from the merged summaries — NEVER re-Read the images "
+        "     yourself afterwards.\n"
+        "  5. If a subagent fails or returns malformed JSON, retry "
+        "     JUST THAT BATCH (don't redo successful ones).\n"
+        "  Floor plan exception: ALWAYS Read floor plans yourself "
+        "  rather than via subagent. They need careful cross-reference "
+        "  to room counts you mention later and you can't lose that "
+        "  detail to a subagent's summary.\n"
+        "  Why this matters: a 35-image sweep done sequentially has "
+        "  failed mid-turn before (model context fatigue + token "
+        "  budget). The parallel-subagent pattern is the difference "
+        "  between 60% reliability and ~100%.\n"
+        ""
         "ATTACHMENT INVARIANT — non-negotiable: if the user's message "
         "starts with a `📎 Attached N file(s)` header, you MUST use the "
         "Read tool to open EVERY file in the list before answering ANY "
@@ -425,6 +463,14 @@ async def stream_message(
     # surfacings would cause spurious bubble_break events on the WS.
     seen_tool_use_ids: set[str] = set()
 
+    # Diagnostic counters — used to log a summary at end-of-turn so
+    # we can see how many of each event type came through. Set
+    # HARCOURTS_VERBOSE_STREAM=true to log every line as it arrives
+    # (noisy; only for active debugging).
+    import os as _os
+    _verbose = _os.environ.get("HARCOURTS_VERBOSE_STREAM") == "true"
+    _event_counts: dict[str, int] = {}
+
     try:
         async for raw_line in proc.stdout:
             line = raw_line.strip()
@@ -435,6 +481,17 @@ async def stream_message(
             except json.JSONDecodeError:
                 log.warning("non-JSON line from claude: %r", line[:200])
                 continue
+
+            _t = obj.get("type", "<no-type>")
+            _event_counts[_t] = _event_counts.get(_t, 0) + 1
+            if _verbose:
+                # Compact preview — what kind, what content shape.
+                _content = (obj.get("message") or {}).get("content") if isinstance(obj.get("message"), dict) else None
+                _kinds = (
+                    [b.get("type") for b in _content if isinstance(b, dict)]
+                    if isinstance(_content, list) else None
+                )
+                log.info("stream-line: type=%s content_kinds=%s", _t, _kinds)
 
             # ---------------------------------------------------------
             # Assistant events get bespoke processing for bubble-split.
@@ -544,6 +601,12 @@ async def stream_message(
             summary.error_message = (
                 summary.error_message or f"claude exited with code {rc}"
             )
+        log.info(
+            "stream done: session=%s rc=%s event_counts=%s tool_use_ids_seen=%d",
+            summary.session_id, rc, _event_counts, len(seen_tool_use_ids),
+        )
+        if summary.stderr_tail.strip():
+            log.warning("stream stderr: %s", summary.stderr_tail[-500:])
         yield summary
 
 

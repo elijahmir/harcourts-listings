@@ -700,25 +700,39 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
           {messages.length === 0 ? (
             <EmptyState slug={slug} onPickStarter={handlePickStarter} />
           ) : (
-            <ol ref={messagesRef} className="flex-1 space-y-6 py-6">
-              {messages.map((m) => (
-                <MessageBubble
-                  key={m.id}
-                  message={m}
-                  backendUrl={backendUrl}
-                  consultantSlug={slug}
-                  userName={userName}
-                  activity={m.streaming ? activity : null}
-                  editing={editingLearningForId === m.id}
-                  saved={savedLearningMessageIds.has(m.id)}
-                  onStartSave={() => setEditingLearningForId(m.id)}
-                  onCancelSave={() => setEditingLearningForId(null)}
-                  onSubmitSave={(args) => handleSaveLearning(m.id, args)}
-                  defaultTrigger={triggerForMessage.get(m.id) ?? ""}
-                  listingSaveState={listingSaveState[m.id]}
-                  onSaveListing={(extracted) => handleSaveListing(m.id, extracted)}
-                />
-              ))}
+            <ol ref={messagesRef} className="flex-1 py-6">
+              {messages.map((m, i) => {
+                // Avatar grouping + tighter spacing: show the
+                // consultant photo (or user initials chip) only on
+                // the LAST bubble of a consecutive run, and pack
+                // bubbles within a group close together (4px gap)
+                // while keeping the big 24px gap between groups.
+                // Matches iMessage / Slack / WhatsApp grouping.
+                const prev = messages[i - 1];
+                const next = messages[i + 1];
+                const isFirstInGroup = !prev || prev.role !== m.role;
+                const isLastInGroup = !next || next.role !== m.role;
+                return (
+                  <MessageBubble
+                    key={m.id}
+                    message={m}
+                    backendUrl={backendUrl}
+                    consultantSlug={slug}
+                    userName={userName}
+                    activity={m.streaming ? activity : null}
+                    editing={editingLearningForId === m.id}
+                    saved={savedLearningMessageIds.has(m.id)}
+                    onStartSave={() => setEditingLearningForId(m.id)}
+                    onCancelSave={() => setEditingLearningForId(null)}
+                    onSubmitSave={(args) => handleSaveLearning(m.id, args)}
+                    defaultTrigger={triggerForMessage.get(m.id) ?? ""}
+                    listingSaveState={listingSaveState[m.id]}
+                    onSaveListing={(extracted) => handleSaveListing(m.id, extracted)}
+                    isLastInGroup={isLastInGroup}
+                    isFirstInGroup={isFirstInGroup}
+                  />
+                );
+              })}
               <div ref={bottomRef} />
             </ol>
           )}
@@ -1226,6 +1240,16 @@ interface MessageBubbleProps {
    *  saved, "error:..." = failed. */
   listingSaveState?: string;
   onSaveListing: (extracted: ExtractedListing) => Promise<void>;
+  /** True when this message is the last in a consecutive run from the
+   *  same role. Drives avatar visibility — only the trailing bubble
+   *  of a group shows the avatar (Slack / iMessage pattern). The
+   *  space stays reserved so non-trailing bubbles still align. */
+  isLastInGroup: boolean;
+  /** True when this message is the first in a consecutive run.
+   *  Drives spacing — first-in-group gets the big 24px top gap
+   *  separating it from the previous group; non-first-in-group gets
+   *  a tight 4px gap so the run reads as one thought. */
+  isFirstInGroup: boolean;
 }
 
 // Pull every downloadable-file mention out of an assistant message so
@@ -1341,6 +1365,8 @@ function MessageBubble({
   onSubmitSave,
   listingSaveState,
   onSaveListing,
+  isLastInGroup,
+  isFirstInGroup,
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const canSave =
@@ -1369,20 +1395,28 @@ function MessageBubble({
       className={cn(
         "group flex w-full items-end gap-2",
         isUser ? "justify-end" : "justify-start",
+        // Per-bubble vertical spacing: 24px between groups, 4px
+        // within a group. First message in the list has no top
+        // margin so the chat doesn't start with whitespace.
+        isFirstInGroup ? "mt-6 first:mt-0" : "mt-1",
       )}
     >
-      {/* Assistant avatar — left of the bubble. Uses the consultant's
-          actual photo (lib/avatars.ts maps slug→PNG) with the initials
-          fallback baked into AvatarCircle. items-end aligns it with
-          the bottom of the bubble so a tall message doesn't look top-
-          heavy. shrink-0 stops it being squashed on narrow viewports. */}
+      {/* Assistant avatar — left of the bubble, ONLY on the last
+          bubble of a consecutive run from the same role. Non-
+          trailing bubbles get a same-size spacer so alignment stays
+          stable. items-end aligns with the bottom of the bubble so a
+          tall message doesn't look top-heavy. */}
       {!isUser && (
-        <AvatarCircle
-          slug={consultantSlug}
-          size={32}
-          animate={false}
-          className="shrink-0"
-        />
+        isLastInGroup ? (
+          <AvatarCircle
+            slug={consultantSlug}
+            size={32}
+            animate={false}
+            className="shrink-0"
+          />
+        ) : (
+          <div className="h-8 w-8 shrink-0" aria-hidden />
+        )
       )}
 
       <div className={cn("flex max-w-[80%] flex-col", isUser && "items-end")}>
@@ -1601,13 +1635,16 @@ function MessageBubble({
       </div>
 
       {/* User avatar — right of the bubble. Cyan-filled circle with
-          two-letter initials in white, derived from the signed-in
-          email or freeform name (Elijah Mirandilla → "EM"). No PNG
-          lookup — the user's photo isn't part of Harcourts' avatar
-          library; initials are intentionally generic so any future
-          consultant or teammate "just works" without a portrait. */}
+          two-letter initials (Elijah Mirandilla → "EM"). Shown only on
+          the LAST bubble of a consecutive run from the user; non-
+          trailing user bubbles get a same-size spacer so right-edge
+          alignment stays consistent. */}
       {isUser && (
-        <UserInitialsAvatar name={userName} size={32} className="shrink-0" />
+        isLastInGroup ? (
+          <UserInitialsAvatar name={userName} size={32} className="shrink-0" />
+        ) : (
+          <div className="h-8 w-8 shrink-0" aria-hidden />
+        )
       )}
     </li>
   );
