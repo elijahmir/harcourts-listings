@@ -680,3 +680,51 @@ export async function uploadFiles(
   }
   return (await res.json()) as UploadedFile[];
 }
+
+/**
+ * Download a generated deliverable (`outputs/<filename>`) and trigger a
+ * native save dialog in the user's browser.
+ *
+ * Why this exists rather than a plain `<a href>`: the download endpoint
+ * is JWT-gated. A direct browser navigation to the URL doesn't send the
+ * Authorization header that lib/ws.ts attaches via `fetch()` — it just
+ * goes to the URL and gets a 401 "missing token". We fetch the bytes
+ * here (with the header), turn the response into a blob, and use a
+ * temporary anchor + object URL to invoke the browser's save dialog.
+ *
+ * Caller usually catches errors and surfaces them in the chat UI.
+ */
+export async function downloadOutput(
+  backendUrl: string,
+  filename: string,
+): Promise<void> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/outputs/${encodeURIComponent(filename)}`,
+    { cache: "no-store", headers: await authHeaders() },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail || "";
+    } catch {
+      detail = res.statusText;
+    }
+    throw new Error(`download ${res.status}: ${detail || "failed"}`);
+  }
+  const blob = await res.blob();
+  // Spin up a one-shot object URL + invisible anchor to invoke the
+  // browser's save dialog. Cleaned up immediately so we don't leak
+  // memory on a session with many downloads.
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = filename;
+  // Some browsers require the anchor to be in the DOM before .click()
+  // actually fires the save flow (Safari especially).
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Revoke after a short delay so Safari/Chrome have time to start the
+  // download before the URL becomes invalid.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+}

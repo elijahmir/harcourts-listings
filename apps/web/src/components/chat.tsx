@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { UploadButton } from "@/components/upload-button";
 import {
+  downloadOutput,
   fetchConsultants,
   fetchSessionMessages,
   saveLearning,
@@ -1151,26 +1152,34 @@ function MessageBubble({
         {downloadable.length > 0 && (
           <div className="mt-2 flex flex-wrap items-center gap-2 self-start">
             {downloadable.map((filename) => (
-              <a
+              <button
                 key={filename}
-                // backendUrl is "" briefly on first paint; we hide the
-                // link until it's resolved so iOS Safari doesn't bind
-                // a broken href.
-                href={
-                  backendUrl
-                    ? `${backendUrl}/api/outputs/${encodeURIComponent(filename)}`
-                    : undefined
-                }
-                // `download` is a hint; the backend ALWAYS sets
-                // Content-Disposition: attachment, which is what
-                // actually persuades iOS Safari to save to Files
-                // instead of opening Quick Look.
-                download={filename}
-                className="inline-flex items-center gap-1.5 rounded-md border border-input bg-background px-2.5 py-1 text-xs font-medium text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground"
+                type="button"
+                // Plain <a href> doesn't work here because the download
+                // endpoint is JWT-gated and a browser navigation skips
+                // the Authorization header. downloadOutput() fetches
+                // with auth, then triggers the browser's save dialog
+                // via a blob URL. See lib/ws.ts for details.
+                onClick={async () => {
+                  if (!backendUrl) return;
+                  try {
+                    await downloadOutput(backendUrl, filename);
+                  } catch (err) {
+                    // Inline the error in the chat-relative space so the
+                    // user sees what went wrong (file gone, auth lapsed,
+                    // network). alert() is intentionally chosen for
+                    // simplicity — this is a rare path.
+                    alert(
+                      err instanceof Error ? err.message : String(err),
+                    );
+                  }
+                }}
+                disabled={!backendUrl}
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-input bg-background px-2.5 py-1 text-xs font-medium text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Download className="h-3.5 w-3.5" />
                 {filename}
-              </a>
+              </button>
             ))}
           </div>
         )}
