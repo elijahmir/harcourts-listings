@@ -42,6 +42,16 @@ class Settings:
         self.max_upload_bytes: int = int(
             os.environ.get("HARCOURTS_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))
         )
+        # Supabase project for the CopyPro listings repo. URL is the
+        # `https://<ref>.supabase.co` form. Service-role key bypasses RLS
+        # for backend writes; per-user isolation is then enforced in
+        # application code by always filtering by user_email/user_id.
+        # Both unset = listings feature disabled (backend boots, /api
+        # endpoints that need Supabase return 503).
+        self.supabase_url: str = os.environ.get("HARCOURTS_SUPABASE_URL", "")
+        self.supabase_service_key: str = os.environ.get(
+            "HARCOURTS_SUPABASE_SERVICE_KEY", ""
+        )
 
     def consultant_folder(self, slug: str) -> Path:
         """Return the on-disk folder for a consultant slug, or raise if missing.

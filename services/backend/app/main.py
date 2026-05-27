@@ -38,6 +38,7 @@ from .auth import AuthedUser, AuthError, authed_or_raise, extract_bearer, extrac
 from .config import get_settings
 from .db import get_db
 from .learnings import router as learnings_router
+from .listings import router as listings_router
 from .runner import StreamEvent, StreamSummary, stream_message
 from .uploads import router as uploads_router
 
@@ -318,11 +319,12 @@ app.add_middleware(
     # to be the specific origin echoed back, which the regex above lets
     # CORSMiddleware do automatically.
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "DELETE", "PATCH"],
     allow_headers=["*"],
 )
 
 app.include_router(learnings_router)
+app.include_router(listings_router)
 app.include_router(uploads_router)
 
 

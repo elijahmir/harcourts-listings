@@ -5,3 +5,8 @@ Pillow>=10.0
 pillow-heif>=0.16
 httpx>=0.27
 PyJWT>=2.9
+# Supabase Python client. Used by app/supabase_client.py for the CopyPro
+# listings repo (read/write copypro_listings + revisions). The service-role
+# key is used for backend writes; RLS policies still enforce per-user
+# isolation by passing the caller's email/uid through.
+supabase>=2.7

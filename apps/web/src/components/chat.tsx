@@ -20,6 +20,7 @@ import {
   fetchConsultants,
   fetchSessionMessages,
   saveLearning,
+  saveListing,
   uploadFilesWithProgress,
   useChat,
   type ChatMessage,
@@ -174,6 +175,15 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
   const [editingLearningForId, setEditingLearningForId] = useState<string | null>(
     null,
   );
+  // Per-message state for the "Save as listing" button.
+  // Three terminal states encoded as a single map:
+  //   missing key  → idle, button shows "Save as listing"
+  //   value "saving"   → in-flight, button disabled + spinner
+  //   value "<listing-id>" → success, button shows "Saved" + link
+  //   value starting with "error:" → failure with reason
+  const [listingSaveState, setListingSaveState] = useState<
+    Record<string, string>
+  >({});
   // Tracks the SQLite session id for THIS consultant. Comes from localStorage
   // on consultant change, gets overwritten when the backend confirms one via
   // the `done` event. We hold it in state (not useMemo) so the UploadButton
@@ -540,6 +550,37 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
     setEditingLearningForId(null);
   }
 
+  // Save a "Listing-shaped" assistant message to the Supabase listings
+  // repo. The button triggering this is rendered inside MessageBubble
+  // and only shown when extractListingFromMessage(message.text) returns
+  // a value (i.e. the message has the **Address:** frontmatter).
+  async function handleSaveListing(
+    messageId: string,
+    extracted: ExtractedListing,
+  ) {
+    if (!slug || !sessionId) return;
+    setListingSaveState((prev) => ({ ...prev, [messageId]: "saving" }));
+    try {
+      const row = await saveListing({
+        backendUrl,
+        chatSessionId: sessionId,
+        consultantSlug: slug,
+        address: extracted.address,
+        addressSlug: extracted.addressSlug,
+        headline: extracted.headline,
+        bodyMd: extracted.bodyMd,
+        socialCaption: extracted.socialCaption,
+        signboardBlurb: extracted.signboardBlurb,
+      });
+      setListingSaveState((prev) => ({ ...prev, [messageId]: row.id }));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setListingSaveState((prev) => ({
+        ...prev, [messageId]: `error:${msg}`,
+      }));
+    }
+  }
+
   return (
     // Flex column anchored to the parent's height. In the standalone repo
     // the parent is <body className="h-full">, so this fills the viewport.
@@ -605,6 +646,8 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
                   onCancelSave={() => setEditingLearningForId(null)}
                   onSubmitSave={(args) => handleSaveLearning(m.id, args)}
                   defaultTrigger={triggerForMessage.get(m.id) ?? ""}
+                  listingSaveState={listingSaveState[m.id]}
+                  onSaveListing={(extracted) => handleSaveListing(m.id, extracted)}
                 />
               ))}
               <div ref={bottomRef} />
@@ -1109,6 +1152,11 @@ interface MessageBubbleProps {
   onStartSave: () => void;
   onCancelSave: () => void;
   onSubmitSave: (args: { title: string; trigger: string; rule: string }) => Promise<void>;
+  /** Save-as-listing state for THIS message — see listingSaveState in
+   *  the parent. undefined = idle, "saving" = in-flight, "<uuid>" =
+   *  saved, "error:..." = failed. */
+  listingSaveState?: string;
+  onSaveListing: (extracted: ExtractedListing) => Promise<void>;
 }
 
 // Pull every downloadable-file mention out of an assistant message so
@@ -1135,6 +1183,81 @@ function extractOutputFilenames(text: string): string[] {
   return [...seen];
 }
 
+// ---------------------------------------------------------------------------
+// Listing-shaped message detection
+//
+// The system prompt's Phase 5 rule asks the assistant to wrap the final
+// listing in a known frontmatter:
+//
+//     **Address:** 158 Preservation Drive, Preservation Bay TAS 7316
+//     **Headline:** A breathtaking three-level beach-frontage retreat
+//
+//     ## Listing
+//     <body, CTA, disclaimer>
+//
+//     ## Brochure Text / Window Card / RealEstateVIEW Guide / Social Media Caption
+//
+// We detect that shape here so a "Save as listing" button can render
+// alongside the message. Returns null when the frontmatter is absent
+// (i.e. a regular chat reply); button stays hidden.
+// ---------------------------------------------------------------------------
+
+interface ExtractedListing {
+  address: string;
+  addressSlug: string;
+  headline: string | null;
+  bodyMd: string;             // the full structured body, frontmatter stripped
+  socialCaption: string | null;
+  signboardBlurb: string | null;
+}
+
+function slugifyAddress(address: string): string {
+  return address
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 200);
+}
+
+function extractSection(text: string, heading: string): string | null {
+  // Anchor on `## <heading>` (possibly trailing whitespace). Pull lines
+  // until the next `## ` heading or end of message.
+  const re = new RegExp(`(^|\\n)##\\s+${heading}\\s*\\n`, "i");
+  const match = re.exec(text);
+  if (!match) return null;
+  const start = match.index + match[0].length;
+  const after = text.slice(start);
+  const nextHeading = /\n##\s+/m.exec(after);
+  const body = (nextHeading ? after.slice(0, nextHeading.index) : after).trim();
+  return body || null;
+}
+
+function extractListingFromMessage(text: string): ExtractedListing | null {
+  const addressMatch = text.match(/^\*\*Address:\*\*\s*(.+)$/m);
+  if (!addressMatch) return null;
+  const address = addressMatch[1].trim();
+  if (!address) return null;
+  const headlineMatch = text.match(/^\*\*Headline:\*\*\s*(.+)$/m);
+  const headline = headlineMatch ? headlineMatch[1].trim() : null;
+  // bodyMd = the whole message minus the two frontmatter lines, trimmed.
+  // We keep the section headings (## Listing, etc) intact because they
+  // round-trip nicely back to a Word doc on demand.
+  const bodyMd = text
+    .replace(/^\*\*Address:\*\*.*$/m, "")
+    .replace(/^\*\*Headline:\*\*.*$/m, "")
+    .trim();
+  if (bodyMd.length < 10) return null; // sanity guard
+  return {
+    address,
+    addressSlug: slugifyAddress(address),
+    headline,
+    bodyMd,
+    socialCaption: extractSection(text, "Social Media Caption"),
+    signboardBlurb: extractSection(text, "Window Card"),
+  };
+}
+
 function MessageBubble({
   message,
   backendUrl,
@@ -1147,6 +1270,8 @@ function MessageBubble({
   onStartSave,
   onCancelSave,
   onSubmitSave,
+  listingSaveState,
+  onSaveListing,
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const canSave =
@@ -1156,6 +1281,17 @@ function MessageBubble({
       !isUser && !message.streaming
         ? extractOutputFilenames(message.text)
         : [],
+    [isUser, message.streaming, message.text],
+  );
+  // Detect a "Listing-shaped" assistant message — non-null if the body
+  // has the **Address:** frontmatter the Phase 5 system-prompt rule
+  // asks the assistant to emit. Used to gate the "Save as listing"
+  // button so it only appears when there's something to save.
+  const extractedListing = useMemo(
+    () =>
+      !isUser && !message.streaming
+        ? extractListingFromMessage(message.text)
+        : null,
     [isUser, message.streaming, message.text],
   );
 
@@ -1278,7 +1414,7 @@ function MessageBubble({
             clean during quick reads while still letting the user copy
             without a long-press. */}
         {!isUser && !message.streaming && message.text.length > 0 && (
-          <div className="mt-1 flex items-center gap-1 self-start">
+          <div className="mt-1 flex flex-wrap items-center gap-1 self-start">
             {canSave && !editing && !saved && (
               <button
                 type="button"
@@ -1293,6 +1429,46 @@ function MessageBubble({
               <span className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-emerald-600 dark:text-emerald-500">
                 <BookmarkPlus className="h-3.5 w-3.5" />
                 Saved to learnings
+              </span>
+            )}
+            {/* Save-as-listing button — only renders for messages
+                shaped like a final listing (Address: frontmatter). */}
+            {extractedListing && !listingSaveState && (
+              <button
+                type="button"
+                onClick={() => onSaveListing(extractedListing)}
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
+                title={`Save listing for ${extractedListing.address}`}
+              >
+                <BookmarkPlus className="h-3.5 w-3.5" />
+                Save as listing
+              </button>
+            )}
+            {listingSaveState === "saving" && (
+              <span className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground">
+                <BookmarkPlus className="h-3.5 w-3.5 animate-pulse" />
+                Saving listing…
+              </span>
+            )}
+            {listingSaveState &&
+              listingSaveState !== "saving" &&
+              !listingSaveState.startsWith("error:") && (
+                <a
+                  href={`/dashboard/listings/${listingSaveState}`}
+                  className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-emerald-600 hover:underline dark:text-emerald-500"
+                  title="Open in the listings repo"
+                >
+                  <BookmarkPlus className="h-3.5 w-3.5" />
+                  Saved to listings →
+                </a>
+              )}
+            {listingSaveState?.startsWith("error:") && (
+              <span
+                className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-destructive"
+                title={listingSaveState.slice("error:".length)}
+              >
+                <BookmarkPlus className="h-3.5 w-3.5" />
+                Listing save failed
               </span>
             )}
             <span className="opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100">

@@ -657,6 +657,168 @@ export interface UploadedFile {
   converted_from_heic: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Listings repo — CopyPro's persisted listings on Supabase.
+//
+// Owner-scoped reads + writes (admins see all). The backend handles RLS;
+// these helpers just shape the requests + thread the existing auth +
+// ngrok-skip headers through authHeaders().
+// ---------------------------------------------------------------------------
+
+export interface ListingRow {
+  id: string;
+  user_email: string;
+  consultant_slug: string;
+  chat_session_id: string;
+  address: string;
+  address_slug: string;
+  headline: string | null;
+  body_md?: string;                    // only present on GET /api/listings/{id}
+  social_caption?: string | null;
+  signboard_blurb?: string | null;
+  status: "final" | "archived";
+  docx_filename: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  revisions?: ListingRevisionRow[];   // populated when include_revisions=true
+}
+
+export interface ListingRevisionRow {
+  id: string;
+  listing_id: string;
+  body_md: string;
+  headline: string | null;
+  social_caption: string | null;
+  signboard_blurb: string | null;
+  metadata: Record<string, unknown>;
+  edited_by: string;
+  edit_summary: string | null;
+  created_at: string;
+}
+
+export interface CreateListingArgs {
+  backendUrl: string;
+  chatSessionId: string;
+  consultantSlug: string;
+  address: string;
+  addressSlug: string;
+  headline?: string | null;
+  bodyMd: string;
+  socialCaption?: string | null;
+  signboardBlurb?: string | null;
+  docxFilename?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+/** Save a completed CopyPro listing to the Supabase repo. */
+export async function saveListing(args: CreateListingArgs): Promise<ListingRow> {
+  const body = {
+    chat_session_id: args.chatSessionId,
+    consultant_slug: args.consultantSlug,
+    address: args.address,
+    address_slug: args.addressSlug,
+    headline: args.headline ?? null,
+    body_md: args.bodyMd,
+    social_caption: args.socialCaption ?? null,
+    signboard_blurb: args.signboardBlurb ?? null,
+    docx_filename: args.docxFilename ?? null,
+    metadata: args.metadata ?? {},
+  };
+  const res = await fetch(
+    `${args.backendUrl.replace(/\/$/, "")}/api/listings`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`saveListing ${res.status}: ${detail || "failed"}`);
+  }
+  return (await res.json()) as ListingRow;
+}
+
+/** List listings visible to the caller (own + admin-all). */
+export async function fetchListings(
+  backendUrl: string,
+  opts: { consultantSlug?: string; q?: string; limit?: number } = {},
+): Promise<ListingRow[]> {
+  const params = new URLSearchParams();
+  if (opts.consultantSlug) params.set("consultant_slug", opts.consultantSlug);
+  if (opts.q) params.set("q", opts.q);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const url = `${backendUrl.replace(/\/$/, "")}/api/listings${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) throw new Error(`fetchListings ${res.status}: ${res.statusText}`);
+  return (await res.json()) as ListingRow[];
+}
+
+/** Fetch one listing in full (body + optional revision history). */
+export async function fetchListing(
+  backendUrl: string,
+  listingId: string,
+  opts: { includeRevisions?: boolean } = {},
+): Promise<ListingRow> {
+  const params = new URLSearchParams();
+  if (opts.includeRevisions) params.set("include_revisions", "true");
+  const qs = params.toString();
+  const url =
+    `${backendUrl.replace(/\/$/, "")}/api/listings/${encodeURIComponent(listingId)}` +
+    (qs ? `?${qs}` : "");
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`fetchListing ${res.status}: ${detail || "failed"}`);
+  }
+  return (await res.json()) as ListingRow;
+}
+
+/** Patch a listing. The backend trigger auto-snapshots prior state into
+ *  copypro_listing_revisions when any text field changes. */
+export async function updateListing(
+  backendUrl: string,
+  listingId: string,
+  patch: Partial<{
+    headline: string;
+    body_md: string;
+    social_caption: string;
+    signboard_blurb: string;
+    status: "final" | "archived";
+    docx_filename: string;
+    metadata: Record<string, unknown>;
+    edit_summary: string;
+  }>,
+): Promise<ListingRow> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/listings/${encodeURIComponent(listingId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`updateListing ${res.status}: ${detail || "failed"}`);
+  }
+  return (await res.json()) as ListingRow;
+}
+
 export async function uploadFiles(
   backendUrl: string,
   sessionId: string,
