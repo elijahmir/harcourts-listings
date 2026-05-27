@@ -18,6 +18,7 @@ import { UploadButton } from "@/components/upload-button";
 import {
   downloadOutput,
   fetchConsultants,
+  fetchSessionInfo,
   fetchSessionMessages,
   saveLearning,
   saveListing,
@@ -184,6 +185,13 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
   const [listingSaveState, setListingSaveState] = useState<
     Record<string, string>
   >({});
+  // When an admin (or the dev-user stub) opens a session that someone
+  // else owns, we surface a yellow banner above the chat warning that
+  // any new message will be added to THEIR session, not yours. Without
+  // it, the chat looks "fresh" but Wendy carries the prior context via
+  // --resume and silently appends to history — confusing as hell.
+  // Null = current session is yours or there's no session yet.
+  const [otherUserOwning, setOtherUserOwning] = useState<string | null>(null);
   // Tracks the SQLite session id for THIS consultant. Comes from localStorage
   // on consultant change, gets overwritten when the backend confirms one via
   // the `done` event. We hold it in state (not useMemo) so the UploadButton
@@ -269,6 +277,41 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
       clearSessionIdFromUrl();
     }
   }, [sessionId]);
+
+  // When sessionId changes, check if it's owned by someone other than
+  // the current user. If so (admin viewing a teammate's session, or
+  // dev-user looking at a real user's session), surface a banner so
+  // they don't accidentally write into someone else's history. 404
+  // from the endpoint means "you don't own it AND aren't admin" — in
+  // that case there's nothing to warn about because the user simply
+  // can't see the session anyway.
+  useEffect(() => {
+    if (!sessionId || !backendUrl || !userName) {
+      setOtherUserOwning(null);
+      return;
+    }
+    let cancelled = false;
+    fetchSessionInfo(backendUrl, sessionId)
+      .then((info) => {
+        if (cancelled || !info) return;
+        // Only flag a mismatch when both emails look real. The dev-user
+        // stub (empty / "dev-…") shouldn't pop a banner during local
+        // testing — that just adds noise.
+        const looksReal =
+          userName.includes("@") && (info.user_name || "").includes("@");
+        if (looksReal && info.user_name !== userName) {
+          setOtherUserOwning(info.user_name);
+        } else {
+          setOtherUserOwning(null);
+        }
+      })
+      .catch(() => {
+        // Quiet failure — if the lookup fails we just don't show the
+        // banner. The chat still works.
+        if (!cancelled) setOtherUserOwning(null);
+      });
+    return () => { cancelled = true; };
+  }, [sessionId, backendUrl, userName]);
 
   const messagesRef = useRef<HTMLOListElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -626,6 +669,32 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
           (Slack, Notion, Linear all use it).
           `min-h-0` lets the flex child shrink below its content size
           so overflow actually scrolls instead of pushing the column. */}
+      {/* Other-user-session banner. Shown when an admin (or dev-user)
+          opens a session not owned by the current user. Without this
+          the chat would look like a fresh thread but Wendy carries
+          the prior owner's context via --resume and silently appends
+          to their history — confusing for both parties. The "Start a
+          new chat" link is the safe action: clicking it nulls the
+          session so the next message creates a fresh one. */}
+      {otherUserOwning && (
+        <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900">
+          <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-2">
+            <span>
+              ⚠ Viewing <b>{otherUserOwning}</b>&apos;s session. Any
+              message you send here will be added to their chat history,
+              not yours.
+            </span>
+            <button
+              type="button"
+              onClick={startNewConversation}
+              className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-white px-2.5 py-1 font-medium text-amber-900 hover:bg-amber-100"
+            >
+              Start a new chat →
+            </button>
+          </div>
+        </div>
+      )}
+
       <main className="chat-scroll flex w-full min-h-0 flex-1 flex-col overflow-y-auto">
         <div className="mx-auto w-full max-w-5xl flex-1 px-4">
           {messages.length === 0 ? (

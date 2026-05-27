@@ -542,24 +542,60 @@ def list_sessions(
     )
 
 
+@app.get("/api/sessions/{session_id}")
+def get_session_info(
+    session_id: str,
+    user: AuthedUser = Depends(require_auth),
+) -> dict:
+    """Minimal session metadata (no messages). Used by the frontend to
+    decide whether to render the 'viewing another user's session'
+    banner before the chat starts. Same auth rules as the read
+    endpoints: owner, dev-user, or CopyPro admin.
+    """
+    from .supabase_client import is_admin_email  # local import — supabase optional
+    db = get_db()
+    sess = db.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="not found")
+    is_admin = (
+        user.sub == "dev-user"
+        or sess.get("user_name") == user.email
+        or is_admin_email(user.email)
+    )
+    if not is_admin:
+        raise HTTPException(status_code=404, detail="not found")
+    return {
+        "id": sess.get("id"),
+        "consultant_slug": sess.get("consultant_slug"),
+        "user_name": sess.get("user_name"),
+        "started_at": sess.get("started_at"),
+        "last_active_at": sess.get("last_active_at"),
+    }
+
+
 @app.get("/api/sessions/{session_id}/messages")
 def list_session_messages(
     session_id: str,
     user: AuthedUser = Depends(require_auth),
 ) -> list[dict]:
-    """Replay a session's chat history. Owner-only in prod mode (the
-    list endpoint already hides other-users' sessions, but a teammate
-    who memorised a session id could still read it without this check)."""
+    """Replay a session's chat history. Owner, dev-user, or CopyPro
+    admin sees the messages. Non-admin non-owner gets [] (rather than
+    403) to avoid leaking session existence via status code.
+
+    Admins seeing other-user sessions is a deliberate part of the
+    'warn + allow' admin policy: they CAN read, but the frontend
+    renders a banner over the chat so they don't accidentally write
+    new messages into someone else's history thinking it's theirs.
+    """
+    from .supabase_client import is_admin_email  # local import — supabase optional
     db = get_db()
     sess = db.get_session(session_id)
     if not sess:
         return []
-    # Dev-user gets the original any-session view. Real users must own
-    # the session; otherwise pretend it doesn't exist (404-equivalent
-    # by returning []) rather than 403 — leaking the existence of
-    # someone else's session by error code is mildly worse than just
-    # showing nothing.
-    if user.sub != "dev-user" and sess.get("user_name") != user.email:
+    is_owner = sess.get("user_name") == user.email
+    is_dev = user.sub == "dev-user"
+    is_admin = is_dev or is_admin_email(user.email)
+    if not is_owner and not is_admin:
         log.warning(
             "list_session_messages refused: %s tried to read session %s "
             "owned by %s", user.email, session_id, sess.get("user_name"),
@@ -974,7 +1010,16 @@ async def chat_ws(websocket: WebSocket) -> None:
                 session_id=session_id, role="user", content=content
             )
 
-            assistant_text = ""
+            # Per-block bubble state. A "block" is the text Wendy
+            # produces between tool calls — each maps to its own
+            # assistant bubble + its own row in the messages table.
+            # current_block_text holds what's being typed RIGHT NOW.
+            # blocks_committed is bumped once we INSERT a row for the
+            # closed block, so token/cost can be attributed correctly
+            # at end-of-turn (only the LAST committed row gets the
+            # turn's tokens/cost — see flush_block below).
+            current_block_text = ""
+            blocks_committed = 0
 
             # The claude subprocess can take 15–30s for image-heavy turns.
             # If the WebSocket drops mid-stream (mobile Safari backgrounding,
@@ -1000,6 +1045,51 @@ async def chat_ws(websocket: WebSocket) -> None:
                         session_id,
                     )
 
+            async def flush_block(
+                *,
+                final: bool = False,
+                input_tokens: int | None = None,
+                output_tokens: int | None = None,
+                cost_usd: float | None = None,
+            ) -> None:
+                """Commit the current_block_text as its own DB row +
+                notify the frontend.
+
+                - Intermediate blocks (called from a tool_use boundary):
+                  no token/cost data on the row. The WS frame emitted
+                  is `bubble_break` so the frontend finalises the live
+                  bubble and starts a fresh placeholder for the next.
+                - Final block (called from StreamSummary): carries the
+                  whole turn's token/cost data on the row. WS frame is
+                  the existing `done` event — emitted by the caller.
+
+                No-op if there's no text to commit (defensive — empty
+                bubbles add noise).
+                """
+                nonlocal current_block_text, blocks_committed
+                text = current_block_text.strip()
+                if not text:
+                    return
+                row_id = db.insert_message(
+                    session_id=session_id,
+                    role="assistant",
+                    content=text,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost_usd,
+                )
+                blocks_committed += 1
+                if not final:
+                    # Tell the frontend to seal the current live bubble
+                    # and spawn a fresh placeholder for the next text.
+                    await _safe_send({
+                        "type": "bubble_break",
+                        "message_id": str(row_id),
+                        "session_id": session_id,
+                    })
+                # Reset for the next block.
+                current_block_text = ""
+
             try:
                 async for ev in stream_message(
                     user_message=content,
@@ -1009,70 +1099,47 @@ async def chat_ws(websocket: WebSocket) -> None:
                     user_first_name=user_first_name,
                 ):
                     if isinstance(ev, StreamSummary):
-                        # Safety net: fall back to Claude Code's own session
-                        # jsonl whenever the in-memory `assistant_text` is
-                        # either empty OR materially shorter than what
-                        # Claude actually wrote. The jsonl is what
-                        # `--resume` reads next turn, so it's the canonical
-                        # record. Why "materially shorter": Claude can
-                        # interleave text → tool_use → more_text in a
-                        # single turn; if our parser missed the post-tool
-                        # text block, SQLite would persist only the
-                        # placeholder pre-tool text ("let me take a
-                        # look...") while the actual analysis sits in the
-                        # jsonl. Trust the longer source.
-                        if ev.session_id:
+                        # End-of-turn safety net: if nothing landed in
+                        # current_block_text AND no blocks were
+                        # committed (so the chat would show empty),
+                        # fall back to reading Claude's own jsonl —
+                        # that's the canonical record `--resume` will
+                        # read next turn. Without this an unusual
+                        # stream-json shape could leave SQLite empty
+                        # despite Claude having generated a reply.
+                        if (
+                            ev.session_id
+                            and not current_block_text.strip()
+                            and blocks_committed == 0
+                        ):
                             jsonl_text = _recover_assistant_text_from_jsonl(
                                 ev.session_id
-                            )
-                            current_len = len(assistant_text.strip())
-                            jsonl_len = len(jsonl_text.strip())
-                            # Only swap in jsonl if (a) we have nothing,
-                            # or (b) jsonl is meaningfully longer (>100
-                            # chars more) — guards against trivial trailing
-                            # whitespace differences flipping back and forth.
-                            if jsonl_text and (
-                                current_len == 0
-                                or jsonl_len > current_len + 100
-                            ):
+                            ) or ""
+                            if jsonl_text.strip():
                                 log.info(
-                                    "swapping assistant text: in-memory=%d chars, "
-                                    "jsonl=%d chars, session=%s",
-                                    current_len, jsonl_len, session_id,
+                                    "recovered %d chars from jsonl for session=%s",
+                                    len(jsonl_text), session_id,
                                 )
-                                assistant_text = jsonl_text
-                                # Emit the recovered text as a synthetic chunk
-                                # so the frontend's live assistant bubble
-                                # actually shows the reply. Without this, the
-                                # text gets persisted to SQLite but the UI's
-                                # in-memory message stays empty (no text_delta
-                                # events fired during the stream) — user sees
-                                # a forever-stuck "Still working" placeholder
-                                # even though the turn completed. The frontend
-                                # chunk handler treats text_full as
-                                # latest-wins, so this exact-once emission is
-                                # the canonical fix.
-                                await _safe_send(
-                                    {
-                                        "type": "chunk",
-                                        "kind": "text_full",
-                                        "text": assistant_text,
-                                        "session_id": ev.session_id,
-                                    }
-                                )
-                            elif current_len == 0 and jsonl_len == 0:
+                                current_block_text = jsonl_text
+                                # Push the recovered text to the UI so
+                                # the frozen placeholder gets filled.
+                                await _safe_send({
+                                    "type": "chunk",
+                                    "kind": "text_full",
+                                    "text": current_block_text,
+                                    "session_id": ev.session_id,
+                                })
+                            else:
                                 log.warning(
-                                    "assistant_text empty after stream + jsonl "
-                                    "fallback for session=%s claude=%s",
+                                    "no text after stream + jsonl fallback "
+                                    "for session=%s claude=%s",
                                     session_id, ev.session_id,
                                 )
 
-                        # Persist the assistant turn + bump session totals
-                        # UNCONDITIONALLY — WS state is irrelevant.
-                        db.insert_message(
-                            session_id=session_id,
-                            role="assistant",
-                            content=assistant_text,
+                        # Flush the LAST block — this one carries the
+                        # turn's token + cost on its row.
+                        await flush_block(
+                            final=True,
                             input_tokens=ev.input_tokens,
                             output_tokens=ev.output_tokens,
                             cost_usd=ev.total_cost_usd,
@@ -1104,25 +1171,26 @@ async def chat_ws(websocket: WebSocket) -> None:
                         break
 
                     assert isinstance(ev, StreamEvent)
-                    # Latest text-bearing event wins. Claude Code's
-                    # stream-json emits cumulative text on each assistant
-                    # delta, with stop_reason flipping from None to a value
-                    # on the final event. The old logic ("first text_delta
-                    # only, then text_full overwrites") missed cases where
-                    # the final assistant event was a tool_result or had no
-                    # text block — leaving assistant_text empty even though
-                    # claude generated a full reply. SQLite then persisted
-                    # 0 chars and the UI showed a forever-stuck placeholder.
+                    # Text events: the runner now emits ONLY the LATEST
+                    # text block's text (not joined-across-blocks), so
+                    # latest-wins is per-block. Block boundaries are
+                    # signalled by tool_use events below — when one
+                    # arrives, we flush the current text as its own DB
+                    # row and reset.
                     if ev.text and ev.kind in ("text_delta", "text_full"):
-                        assistant_text = ev.text
+                        current_block_text = ev.text
 
-                    # Live activity ticker for the UI. tool_use events
-                    # would otherwise be silent on the client (the chunk
-                    # handler only renders text_delta/text_full), leaving
-                    # users staring at a frozen bubble during long tool-
-                    # heavy turns. This frame is purely transient — it's
-                    # not persisted to SQLite.
                     if ev.kind == "tool_use":
+                        # Bubble boundary: commit whatever's currently
+                        # in the live bubble as its own row + tell the
+                        # frontend to seal it and spawn a new one.
+                        # flush_block is no-op if current_block_text is
+                        # empty (e.g. tools fired immediately with no
+                        # preamble — no orphan empty bubble).
+                        await flush_block(final=False)
+                        # Live activity ticker — same behaviour as
+                        # before. The ticker text shows in the NEW
+                        # placeholder bubble while the tool runs.
                         await _safe_send(
                             {
                                 "type": "activity",

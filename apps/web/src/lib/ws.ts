@@ -114,10 +114,24 @@ interface ReadyFrame {
   type: "ready";
 }
 
+/** Bubble boundary mid-turn. Fired by the backend when Claude paused
+ *  one text block (committed as a DB row) and is about to start a new
+ *  one — typically because a tool call ran in between. The frontend
+ *  uses this to finalise the current live bubble and spawn a fresh
+ *  placeholder so the next text streams into a new bubble, matching
+ *  how a real consultant would say "let me check… ok, here's what I
+ *  found". Without this, all text from the turn lands in one bubble. */
+interface BubbleBreakFrame {
+  type: "bubble_break";
+  message_id: string;
+  session_id: string;
+}
+
 type ServerFrame =
   | ReadyFrame
   | ChunkFrame
   | ActivityFrame
+  | BubbleBreakFrame
   | DoneFrame
   | ErrorFrame;
 
@@ -342,6 +356,38 @@ export function useChat(opts: UseChatOptions): UseChatResult {
       return;
     }
 
+    if (frame.type === "bubble_break") {
+      // Mid-turn bubble boundary: the backend just committed the
+      // current live bubble as its own DB row. Seal it (no longer
+      // streaming), stamp it with the persisted DB id so per-message
+      // controls (Save as listing, Save as voice rule, Copy) reference
+      // a real row, then push a fresh empty placeholder for the next
+      // text block to stream into.
+      const liveId = liveAssistantIdRef.current;
+      const newId = makeId();
+      setMessages((prev) => {
+        const sealed = prev.map((m) =>
+          m.id === liveId
+            ? { ...m, id: frame.message_id, streaming: false, createdAt: Date.now() }
+            : m,
+        );
+        return [
+          ...sealed,
+          {
+            id: newId,
+            role: "assistant" as ChatRole,
+            text: "",
+            createdAt: Date.now(),
+            streaming: true,
+          },
+        ];
+      });
+      liveAssistantIdRef.current = newId;
+      // Activity ticker stays on; the next text_delta will overwrite
+      // the empty placeholder once Wendy starts typing the next bubble.
+      return;
+    }
+
     if (frame.type === "done") {
       const liveId = liveAssistantIdRef.current;
       setMessages((prev) =>
@@ -486,6 +532,30 @@ export interface SessionRow {
   total_input_tokens: number;
   total_output_tokens: number;
   total_cost_usd: number;
+}
+
+/** Minimal session metadata. Returned by GET /api/sessions/{id}. Used
+ *  to learn the session owner so the chat can render a banner when an
+ *  admin opens someone else's session. */
+export interface SessionInfo {
+  id: string;
+  consultant_slug: string;
+  user_name: string;
+  started_at: string;
+  last_active_at: string;
+}
+
+export async function fetchSessionInfo(
+  backendUrl: string,
+  sessionId: string,
+): Promise<SessionInfo | null> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}`,
+    { cache: "no-store", headers: await authHeaders() },
+  );
+  if (res.status === 404) return null; // not yours and not admin → don't show banner
+  if (!res.ok) throw new Error(`fetchSessionInfo ${res.status}: ${res.statusText}`);
+  return (await res.json()) as SessionInfo;
 }
 
 /** Fetch recent sessions, optionally filtered to a single consultant. */

@@ -418,6 +418,13 @@ async def stream_message(
 
     summary = StreamSummary()
 
+    # Tool-use dedup. Claude Code's stream-json emits the FULL cumulative
+    # content array on every assistant chunk, so the same tool_use block
+    # appears in every subsequent chunk after the tool is created. We
+    # only want to surface each tool call ONCE to main.py — multiple
+    # surfacings would cause spurious bubble_break events on the WS.
+    seen_tool_use_ids: set[str] = set()
+
     try:
         async for raw_line in proc.stdout:
             line = raw_line.strip()
@@ -428,6 +435,93 @@ async def stream_message(
             except json.JSONDecodeError:
                 log.warning("non-JSON line from claude: %r", line[:200])
                 continue
+
+            # ---------------------------------------------------------
+            # Assistant events get bespoke processing for bubble-split.
+            # Each assistant chunk's content array can contain a mix of
+            # text_block and tool_use blocks (cumulative across the
+            # whole turn). We emit:
+            #   1. One tool_use event per NEW tool_use block (dedup'd)
+            #   2. One text_delta/text_full event for the LAST text
+            #      block in the array — that's the "current bubble" the
+            #      model is writing right now.
+            #
+            # This is what makes multi-bubble turns work: when the
+            # content goes [text₁, tool_use, text₂], main.py sees:
+            #   text_delta("text₁ growing…")  →  text_delta("text₁ done")
+            #   →  tool_use(Bash)             →  text_delta("text₂ start")
+            #   →  text_delta("text₂ growing…") → text_full("text₂ final")
+            # and can flush text₁ as one DB row, fire bubble_break, then
+            # accumulate text₂ as a fresh bubble.
+            # ---------------------------------------------------------
+            if obj.get("type") == "assistant":
+                msg = obj.get("message") or {}
+                content = msg.get("content") or []
+                session_id = obj.get("session_id")
+                if session_id and not summary.session_id:
+                    summary.session_id = session_id
+
+                # Pass 1: surface any NEW tool_use blocks.
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") != "tool_use":
+                        continue
+                    tool_id = block.get("id") or ""
+                    if tool_id and tool_id in seen_tool_use_ids:
+                        continue
+                    if tool_id:
+                        seen_tool_use_ids.add(tool_id)
+                    yield StreamEvent(
+                        kind="tool_use",
+                        tool_name=block.get("name"),
+                        tool_input=block.get("input") or {},
+                        session_id=session_id,
+                        raw=obj,
+                    )
+
+                # Pass 2: surface the CURRENT text block.
+                #
+                # The "current" block is the text the model is writing
+                # right now. We walk content from the end and stop at:
+                #   - a text block → that's the current bubble's text
+                #   - a tool_use   → the model is between blocks (tool
+                #                    just kicked off, no text yet); we
+                #                    emit nothing and wait
+                # If we walk past everything without seeing text, also
+                # nothing to emit.
+                #
+                # This is critical for bubble-split correctness: if we
+                # naively took "last text block anywhere", we'd keep
+                # re-emitting block 1's text on every chunk between
+                # tool_use and text₂'s first byte — causing main.py to
+                # re-flush block 1 (it was already committed). Walking
+                # from end + stopping on tool_use is the right rule.
+                current_text: str | None = None
+                for block in reversed(content):
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "tool_use":
+                        break
+                    if btype == "text":
+                        current_text = block.get("text", "")
+                        break
+                if current_text:
+                    kind = (
+                        "text_full"
+                        if msg.get("stop_reason") is not None
+                        else "text_delta"
+                    )
+                    yield StreamEvent(
+                        kind=kind,
+                        text=current_text,
+                        session_id=session_id,
+                        raw=obj,
+                    )
+                continue  # done with this assistant chunk
+
+            # Non-assistant events: legacy passthrough.
             event = _parse(obj)
             if event.session_id and not summary.session_id:
                 summary.session_id = event.session_id
@@ -439,43 +533,6 @@ async def stream_message(
                 summary.total_cost_usd = event.total_cost_usd or 0.0
                 summary.is_error = event.is_error
                 summary.error_message = event.error_message
-
-            # Claude Code's stream-json emits cumulative assistant events
-            # whose content array grows over the turn. When the model
-            # interleaves text with tool calls (text₁ → tool → text₂),
-            # _parse() short-circuits on the tool_use block and drops
-            # every text block — including a fresh post-tool reply.
-            # Symptom: SQLite persists only text₁ ("let me take a look")
-            # and the user never sees text₂ (the actual analysis).
-            #
-            # Fix: when the raw assistant event carries BOTH text and
-            # tool_use blocks, synthesise a text_delta/text_full event
-            # carrying the joined cumulative text BEFORE the tool_use
-            # event. The live bubble updates via the chunk handler, and
-            # main.py's latest-wins capture (`assistant_text = ev.text`)
-            # gets the full reply for SQLite.
-            if event.kind == "tool_use" and obj.get("type") == "assistant":
-                msg = obj.get("message") or {}
-                content = msg.get("content") or []
-                text_parts = [
-                    b.get("text", "")
-                    for b in content
-                    if isinstance(b, dict) and b.get("type") == "text"
-                ]
-                joined = "\n\n".join(p for p in text_parts if p).strip()
-                if joined:
-                    synth_kind = (
-                        "text_full"
-                        if msg.get("stop_reason") is not None
-                        else "text_delta"
-                    )
-                    yield StreamEvent(
-                        kind=synth_kind,
-                        text=joined,
-                        session_id=event.session_id,
-                        raw=obj,
-                    )
-
             yield event
     finally:
         rc = await proc.wait()
