@@ -405,6 +405,13 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
     reset();
   }
 
+  // True while any batch is still uploading (errored chips don't count —
+  // user already knows about those and chose not to dismiss yet, so we
+  // shouldn't keep blocking their send).
+  const uploadInProgress = pendingUploads.some(
+    (p) => p.status === "uploading",
+  );
+
   function submitDraft(textOverride?: string) {
     // Allow the caller (e.g. a starter-chip click) to send a specific
     // string without going through the `draft` state — necessary because
@@ -412,6 +419,10 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
     // the same tick, so this function would otherwise read the old draft.
     const text = (textOverride ?? draft).trim();
     if (!text || !slug || isStreaming || status !== "ready") return;
+    // Block send while an upload is in flight: otherwise the message
+    // goes out before the files land in `uploads`, leading to "here
+    // are the photos" sent without photos attached.
+    if (uploadInProgress) return;
 
     // If files were uploaded since the last send, bundle them into the
     // message text. That way (a) the user's bubble shows what was attached,
@@ -756,7 +767,16 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
               // (correctly) flags the type mismatch.
               onClick={() => submitDraft()}
               disabled={
-                !draft.trim() || !slug || isStreaming || status !== "ready"
+                !draft.trim() ||
+                !slug ||
+                isStreaming ||
+                status !== "ready" ||
+                uploadInProgress
+              }
+              title={
+                uploadInProgress
+                  ? "Waiting for upload to finish before sending"
+                  : undefined
               }
               size="icon"
               aria-label="Send"
