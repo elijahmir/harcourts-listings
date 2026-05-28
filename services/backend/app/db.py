@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     rule            TEXT NOT NULL,
     saved_by        TEXT NOT NULL,
     session_id      TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    scope           TEXT NOT NULL DEFAULT 'team',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -81,7 +82,28 @@ class Database:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            self._migrate()
         log.info("sqlite ready at %s", path)
+
+    def _migrate(self) -> None:
+        """Idempotent column migrations for pre-existing databases.
+
+        Fresh DBs get every column from _SCHEMA; older DBs (e.g. Neo's live
+        listings.db) predate later columns and need an ALTER. Each step
+        checks PRAGMA table_info first so re-running is a no-op.
+        """
+        cols = {
+            r["name"] for r in self._conn.execute("PRAGMA table_info(learnings)")
+        }
+        if "scope" not in cols:
+            # Default 'team' backfills existing rows — they were global
+            # before per-user scoping existed.
+            self._conn.execute(
+                "ALTER TABLE learnings ADD COLUMN scope TEXT NOT NULL "
+                "DEFAULT 'team'"
+            )
+            self._conn.commit()
+            log.info("migrated: added learnings.scope")
 
     # --- sessions -----------------------------------------------------------
 
@@ -249,15 +271,22 @@ class Database:
         rule: str,
         saved_by: str,
         session_id: str | None,
+        scope: str = "user",
     ) -> dict[str, Any]:
+        """Insert a voice rule. scope='user' (default) keeps it private to
+        saved_by — only that teammate's sessions read it, and it is NOT
+        written to the shared learnings.md. scope='team' is the promoted,
+        everyone-reads-it state (also appended to learnings.md by the API)."""
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT INTO learnings
-                  (consultant_slug, title, trigger, rule, saved_by, session_id)
-                VALUES (?, ?, ?, ?, ?, ?)
+                  (consultant_slug, title, trigger, rule, saved_by,
+                   session_id, scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (consultant_slug, title, trigger, rule, saved_by, session_id),
+                (consultant_slug, title, trigger, rule, saved_by,
+                 session_id, scope),
             )
             self._conn.commit()
             row = self._conn.execute(
@@ -267,15 +296,62 @@ class Database:
         return dict(row)
 
     def list_learnings(
-        self, *, consultant_slug: str, limit: int = 50
+        self,
+        *,
+        consultant_slug: str,
+        scope: str | None = None,
+        limit: int = 50,
     ) -> list[dict[str, Any]]:
+        """List learnings for a consultant, optionally filtered by scope
+        ('user' = all teammates' private rules, for the admin review page;
+        'team' = promoted rules; None = both)."""
+        sql = "SELECT * FROM learnings WHERE consultant_slug = ?"
+        params: list[Any] = [consultant_slug]
+        if scope:
+            sql += " AND scope = ?"
+            params.append(scope)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_user_learnings(
+        self,
+        *,
+        consultant_slug: str,
+        saved_by: str,
+        scope: str = "user",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """A single teammate's private voice rules for a consultant — what
+        the runner injects into that teammate's sessions."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM learnings WHERE consultant_slug = ? "
+                "AND saved_by = ? AND scope = ? "
                 "ORDER BY created_at DESC LIMIT ?",
-                (consultant_slug, limit),
+                (consultant_slug, saved_by, scope, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_learning(self, learning_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM learnings WHERE id = ?", (learning_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def promote_learning(self, learning_id: int) -> dict[str, Any] | None:
+        """Flip a private rule to team scope. The API also appends it to
+        learnings.md so every session reads it from then on."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE learnings SET scope = 'team' WHERE id = ?",
+                (learning_id,),
+            )
+            self._conn.commit()
+        return self.get_learning(learning_id)
 
 
 _instance: Database | None = None

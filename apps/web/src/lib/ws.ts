@@ -717,6 +717,73 @@ export async function saveLearning(args: SaveLearningArgs): Promise<void> {
   }
 }
 
+export interface LearningRow {
+  id: number;
+  consultant_slug: string;
+  title: string;
+  trigger: string;
+  rule: string;
+  saved_by: string;
+  session_id: string | null;
+  scope: string;
+  created_at: string;
+}
+
+/** List a consultant's learnings, optionally by scope ('user' = pending
+ *  per-teammate rules for the admin queue; 'team' = promoted). */
+export async function fetchLearnings(
+  backendUrl: string,
+  consultantSlug: string,
+  scope?: "user" | "team",
+): Promise<LearningRow[]> {
+  const qs = scope ? `?scope=${scope}` : "";
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/learnings/${encodeURIComponent(consultantSlug)}${qs}`,
+    { cache: "no-store", headers: await authHeaders() },
+  );
+  if (!res.ok)
+    throw new Error(`fetchLearnings ${res.status}: ${res.statusText}`);
+  return (await res.json()) as LearningRow[];
+}
+
+/** Admin-only: promote a private voice rule to team scope (appends it to
+ *  the consultant's learnings.md server-side). */
+export async function promoteLearning(
+  backendUrl: string,
+  learningId: number,
+): Promise<LearningRow> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/learnings/${learningId}/promote`,
+    { method: "POST", headers: await authHeaders() },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`promoteLearning ${res.status}: ${detail || "failed"}`);
+  }
+  return (await res.json()) as LearningRow;
+}
+
+/** Admin-only: listings for a consultant with grade counts + public-ref
+ *  flag — the admin review overview. 403 if the caller isn't an admin. */
+export async function fetchAdminListings(
+  backendUrl: string,
+  consultantSlug: string,
+): Promise<ListingRow[]> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/listings/admin-overview?consultant_slug=${encodeURIComponent(consultantSlug)}`,
+    { cache: "no-store", headers: await authHeaders() },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`fetchAdminListings ${res.status}: ${detail || "failed"}`);
+  }
+  return (await res.json()) as ListingRow[];
+}
+
 export interface UploadedFile {
   session_id: string;
   original_filename: string;
@@ -764,6 +831,8 @@ export interface ListingRow {
   updated_at: string;
   revisions?: ListingRevisionRow[];   // populated when include_revisions=true
   grade_summary?: GradeSummary;        // present on GET /api/listings/{id}
+  is_public_reference?: boolean;       // admin-promoted as a team-wide reference
+  viewer_is_admin?: boolean;           // present on GET /api/listings/{id}
 }
 
 export interface ListingRevisionRow {
@@ -924,6 +993,30 @@ export async function gradeListing(
     throw new Error(`gradeListing ${res.status}: ${detail || "failed"}`);
   }
   return (await res.json()) as GradeSummary;
+}
+
+/** Admin-only: promote/demote a listing as a public (team-wide) writing
+ *  reference. Returns the updated listing row. */
+export async function setPublicReference(
+  backendUrl: string,
+  listingId: string,
+  isPublic: boolean,
+): Promise<ListingRow> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/listings/${encodeURIComponent(listingId)}/public-reference`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      body: JSON.stringify({ public: isPublic }),
+    },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`setPublicReference ${res.status}: ${detail || "failed"}`);
+  }
+  return (await res.json()) as ListingRow;
 }
 
 /** Clear the current user's grade on a listing (un-vote). Idempotent. */

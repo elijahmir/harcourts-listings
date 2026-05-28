@@ -362,6 +362,38 @@ def _chat_ui_context(consultant_slug: str, user_first_name: str = "") -> str:
     )
 
 
+def _format_user_voice_rules(consultant_slug: str, user_email: str) -> str:
+    """Build a system-prompt block of the signed-in teammate's PRIVATE
+    voice rules for this consultant (scope='user' in the learnings table).
+
+    These are rules they trained that haven't been promoted team-wide, so
+    they must only shape THEIR sessions — that's why they're injected here
+    per-session rather than written to the shared learnings.md. Team-scope
+    rules still load via the consultant's CLAUDE.md @import as before, so
+    this stacks on top. Cheap: a single local SQLite read.
+    """
+    if not user_email:
+        return ""
+    try:
+        from .db import get_db
+        rules = get_db().list_user_learnings(
+            consultant_slug=consultant_slug, saved_by=user_email,
+        )
+    except Exception:  # noqa: BLE001 — never let this break a turn
+        log.warning("could not load private voice rules for %s", user_email)
+        return ""
+    if not rules:
+        return ""
+    body = "\n".join(f"- {r['title']}: {r['rule']}" for r in rules)
+    return (
+        "\n\nYOUR PRIVATE VOICE RULES — rules this specific teammate "
+        "trained that are NOT yet team-wide. Treat them as voice overrides "
+        "for THIS session only, ranking above the brand guide and the "
+        "shared learnings, exactly like team learnings. Do not mention "
+        "they're private; just write to them:\n" + body + "\n"
+    )
+
+
 @dataclass
 class StreamEvent:
     """A single parsed event off claude's stream-json stdout."""
@@ -468,8 +500,9 @@ async def stream_message(
         # skips the master CLAUDE.md greeting that asks the user to pick
         # one of seven consultants. Without this the first turn is always
         # noise.
-        "--append-system-prompt", _chat_ui_context(
-            consultant_folder.name, user_first_name,
+        "--append-system-prompt", (
+            _chat_ui_context(consultant_folder.name, user_first_name)
+            + _format_user_voice_rules(consultant_folder.name, user_email)
         ),
     ]
     if resume_session_id:

@@ -398,6 +398,60 @@ def list_references(
     return resp.data or []
 
 
+@router.get("/admin-overview", response_model=list[dict])
+def admin_overview(
+    consultant_slug: str = Query(..., max_length=64),
+    user: AuthedUser = Depends(require_auth),
+) -> list[dict]:
+    """Admin-only: every listing for a consultant with up/down grade
+    counts and its public-reference flag, newest first — the data the
+    admin review page ranks for promotion decisions. Non-admins 403.
+
+    Declared before GET /{listing_id} so the UUID route doesn't shadow it.
+    """
+    if not _caller_sees_all(user):
+        raise HTTPException(status_code=403, detail="admin only")
+    sb = get_supabase()
+    try:
+        listings = (
+            sb.table("copypro_listings")
+            .select(
+                "id,address,headline,user_email,is_public_reference,"
+                "created_at,updated_at"
+            )
+            .eq("consultant_slug", consultant_slug)
+            .order("created_at", desc=True)
+            .limit(200)
+            .execute()
+        ).data or []
+    except Exception as exc:  # noqa: BLE001
+        log.exception("admin_overview listings failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"overview failed: {exc}") from exc
+    if not listings:
+        return []
+    ids = [l["id"] for l in listings]
+    try:
+        grades = (
+            sb.table("copypro_listing_grades")
+            .select("listing_id,grade")
+            .in_("listing_id", ids)
+            .execute()
+        ).data or []
+    except Exception as exc:  # noqa: BLE001 — counts are best-effort
+        log.warning("admin_overview grades failed: %s", exc)
+        grades = []
+    counts: dict[str, dict[str, int]] = {}
+    for g in grades:
+        c = counts.setdefault(g["listing_id"], {"up": 0, "down": 0})
+        if g.get("grade") == "up":
+            c["up"] += 1
+        elif g.get("grade") == "down":
+            c["down"] += 1
+    for l in listings:
+        l["grade_summary"] = counts.get(l["id"], {"up": 0, "down": 0})
+    return listings
+
+
 @router.get("/{listing_id}", response_model=dict)
 def get_listing(
     listing_id: UUID,
@@ -440,6 +494,9 @@ def get_listing(
             log.warning("listings.get revisions failed: %s", exc)
             listing["revisions"] = []
     listing["grade_summary"] = _grade_summary(sb, str(listing_id), user.email)
+    # Lets the UI decide whether to show admin-only controls (the
+    # "Make public reference" toggle) without a separate /me round-trip.
+    listing["viewer_is_admin"] = _caller_sees_all(user)
     return listing
 
 
