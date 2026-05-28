@@ -995,6 +995,24 @@ export async function gradeListing(
   return (await res.json()) as GradeSummary;
 }
 
+/** Permanently delete a saved listing (owner or admin). Cascades its
+ *  grades + revisions server-side. */
+export async function deleteListing(
+  backendUrl: string,
+  listingId: string,
+): Promise<void> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/listings/${encodeURIComponent(listingId)}`,
+    { method: "DELETE", headers: await authHeaders() },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`deleteListing ${res.status}: ${detail || "failed"}`);
+  }
+}
+
 /** Admin-only: promote/demote a listing as a public (team-wide) writing
  *  reference. Returns the updated listing row. */
 export async function setPublicReference(

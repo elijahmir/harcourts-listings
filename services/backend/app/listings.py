@@ -711,6 +711,36 @@ def clear_grade(
     return _grade_summary(sb, str(listing_id), user.email)
 
 
+@router.delete("/{listing_id}", response_model=dict)
+def delete_listing(
+    listing_id: UUID,
+    user: AuthedUser = Depends(require_auth),
+) -> dict:
+    """Permanently delete a saved listing. Owner-or-admin (404 otherwise,
+    same visibility rule as get/patch). Removes its grades + revisions
+    first, then the listing.
+
+    Session deletion intentionally KEEPS listings (they're the durable
+    artefact), so this is the only path to remove one — used from the
+    listing detail page's Delete button.
+    """
+    sb = get_supabase()
+    _listing_visible_or_404(sb, listing_id, user)  # owner-or-admin, else 404
+    try:
+        sb.table("copypro_listing_grades").delete().eq(
+            "listing_id", str(listing_id),
+        ).execute()
+        sb.table("copypro_listing_revisions").delete().eq(
+            "listing_id", str(listing_id),
+        ).execute()
+        sb.table("copypro_listings").delete().eq("id", str(listing_id)).execute()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("listings.delete failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"delete failed: {exc}") from exc
+    log.info("listings.delete: id=%s user=%s", listing_id, user.email)
+    return {"deleted": True, "id": str(listing_id)}
+
+
 @router.post("/{listing_id}/public-reference", response_model=dict)
 def set_public_reference(
     listing_id: UUID,
