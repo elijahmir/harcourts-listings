@@ -441,12 +441,22 @@ async def stream_message(
 
     log.info("spawning: %s", shlex.join(args))
 
+    # asyncio.StreamReader's default `limit` is 64KB per line. Claude
+    # Code's stream-json emits tool_result events with image content
+    # (base64-encoded) and large file reads on one JSON line each, so
+    # an image-heavy turn can comfortably exceed 64KB and raise
+    # LimitOverrunError, terminating the loop mid-stream and dropping
+    # the final assistant text. 16MB headroom covers any realistic
+    # single-event payload (HEIC-sized photos round-trip in well under
+    # that) without burning resident memory in the steady state — the
+    # buffer only grows as the reader actually reads.
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(consultant_folder),
+        limit=16 * 1024 * 1024,
     )
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
 
@@ -515,10 +525,38 @@ async def stream_message(
                 msg = obj.get("message") or {}
                 content = msg.get("content") or []
                 session_id = obj.get("session_id")
+                # parent_tool_use_id is set when the assistant event
+                # originates from inside a Task subagent. Subagent
+                # events came through this loop pre-fix and got
+                # treated identically to main-agent events — their
+                # text overwrote main.py's `current_block_text`
+                # (replacing the parent's in-flight bubble with the
+                # subagent's internal narration), and their tool_use
+                # blocks fired flush_block, committing subagent text
+                # as standalone DB rows. On image-heavy turns where
+                # the parent dispatches batches of 5–8 photos across
+                # parallel subagents (per the MANY-IMAGE rule), that
+                # caused the parent's FINAL summary text to vanish:
+                # blocks_committed > 0 from subagent flushes meant
+                # the jsonl-fallback in main.py was skipped, and the
+                # parent's final bubble landed in `current_block_text`
+                # only briefly before being lost to either the next
+                # subagent text or end-of-turn with an empty buffer.
+                # Fix: subagent text is suppressed entirely (it's an
+                # internal mechanism, not chat history). Subagent
+                # tool_use blocks are still surfaced — they drive the
+                # "Reading IMG_4001.jpeg" activity ticker the user
+                # depends on during long image sweeps — but emit as
+                # `subagent_tool_use`, which main.py treats as a
+                # ticker-only event with NO bubble break.
+                is_subagent = obj.get("parent_tool_use_id") is not None
                 if session_id and not summary.session_id:
                     summary.session_id = session_id
 
-                # Pass 1: surface any NEW tool_use blocks.
+                # Pass 1: surface any NEW tool_use blocks. Subagent
+                # tool_uses get a distinct kind so main.py can show
+                # them in the ticker without flushing the parent's
+                # in-flight bubble.
                 for block in content:
                     if not isinstance(block, dict):
                         continue
@@ -530,17 +568,21 @@ async def stream_message(
                     if tool_id:
                         seen_tool_use_ids.add(tool_id)
                     yield StreamEvent(
-                        kind="tool_use",
+                        kind="subagent_tool_use" if is_subagent else "tool_use",
                         tool_name=block.get("name"),
                         tool_input=block.get("input") or {},
                         session_id=session_id,
                         raw=obj,
                     )
 
-                # Pass 2: surface the CURRENT text block.
+                # Pass 2: surface the CURRENT text block — main agent
+                # only. Subagent text is internal narration ("Opening
+                # image 1, classifying as exterior…") and was never
+                # meant to land in the user-facing chat history.
                 #
-                # The "current" block is the text the model is writing
-                # right now. We walk content from the end and stop at:
+                # The "current" block is the text the parent is
+                # writing right now. We walk content from the end
+                # and stop at:
                 #   - a text block → that's the current bubble's text
                 #   - a tool_use   → the model is between blocks (tool
                 #                    just kicked off, no text yet); we
@@ -554,28 +596,29 @@ async def stream_message(
                 # tool_use and text₂'s first byte — causing main.py to
                 # re-flush block 1 (it was already committed). Walking
                 # from end + stopping on tool_use is the right rule.
-                current_text: str | None = None
-                for block in reversed(content):
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type")
-                    if btype == "tool_use":
-                        break
-                    if btype == "text":
-                        current_text = block.get("text", "")
-                        break
-                if current_text:
-                    kind = (
-                        "text_full"
-                        if msg.get("stop_reason") is not None
-                        else "text_delta"
-                    )
-                    yield StreamEvent(
-                        kind=kind,
-                        text=current_text,
-                        session_id=session_id,
-                        raw=obj,
-                    )
+                if not is_subagent:
+                    current_text: str | None = None
+                    for block in reversed(content):
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype == "tool_use":
+                            break
+                        if btype == "text":
+                            current_text = block.get("text", "")
+                            break
+                    if current_text:
+                        kind = (
+                            "text_full"
+                            if msg.get("stop_reason") is not None
+                            else "text_delta"
+                        )
+                        yield StreamEvent(
+                            kind=kind,
+                            text=current_text,
+                            session_id=session_id,
+                            raw=obj,
+                        )
                 continue  # done with this assistant chunk
 
             # Non-assistant events: legacy passthrough.

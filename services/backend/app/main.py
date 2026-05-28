@@ -1226,6 +1226,31 @@ async def chat_ws(websocket: WebSocket) -> None:
                             }
                         )
 
+                    if ev.kind == "subagent_tool_use":
+                        # A subagent (dispatched via Task by the parent
+                        # for the MANY-IMAGE map-reduce) just called a
+                        # tool. Surface it in the UI's activity ticker
+                        # so the user sees "Reading IMG_4001.jpeg"
+                        # during long image sweeps — but DO NOT flush
+                        # the parent's in-flight bubble. The parent
+                        # hasn't moved on; it's waiting for the
+                        # subagent's JSON summary. Flushing here would
+                        # commit whatever was in current_block_text
+                        # (often empty) as a row, leaving the parent's
+                        # final summary text orphaned at end-of-turn.
+                        await _safe_send(
+                            {
+                                "type": "activity",
+                                "summary": _summarise_tool_use(
+                                    ev.tool_name, ev.tool_input
+                                ),
+                                "tool": ev.tool_name,
+                            }
+                        )
+                        continue  # don't fall through to the generic
+                                  # chunk emit below — subagent tool
+                                  # calls aren't chat content.
+
                     await _safe_send(
                         {
                             "type": "chunk",
