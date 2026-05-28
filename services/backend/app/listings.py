@@ -373,7 +373,7 @@ def list_references(
         sb.table("copypro_listings")
         .select(
             "id,consultant_slug,address,headline,body_md,"
-            "is_public_reference,created_at"
+            "is_public_reference,user_email,created_at"
         )
         .eq("consultant_slug", consultant_slug)
     )
@@ -396,6 +396,15 @@ def list_references(
     except Exception as exc:  # noqa: BLE001
         log.exception("references: query failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"references failed: {exc}") from exc
+
+    # "Made by this user, plus admin-public." A caller's pool is the
+    # listings THEY authored and up-voted, plus any public reference.
+    # (An admin can up-vote a teammate's listing; that must not leak into
+    # their references — only an explicit promotion to public shares it.)
+    rows = [
+        r for r in rows
+        if r.get("is_public_reference") or r.get("user_email") == caller_email
+    ]
 
     if q:
         keywords = [w for w in re.split(r"[^a-z0-9]+", q.lower()) if len(w) > 2]
