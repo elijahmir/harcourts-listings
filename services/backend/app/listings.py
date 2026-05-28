@@ -27,6 +27,7 @@ in case anyone ever talks to Supabase from the Sales App directly.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -106,6 +107,11 @@ class GradeIn(BaseModel):
     """
     grade: str = Field(..., pattern="^(up|down)$")
     comment: str | None = Field(None, max_length=2000)
+
+
+class PublicReferenceIn(BaseModel):
+    """Admin promote/demote of a listing as a public writing reference."""
+    public: bool
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +288,113 @@ def list_listings(
     except Exception as exc:  # noqa: BLE001
         log.exception("listings.list failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"list failed: {exc}") from exc
+    return resp.data or []
+
+
+def _references_caller_email(
+    authorization: str | None,
+    x_internal_token: str | None,
+    as_user: str | None,
+) -> str:
+    """Resolve who's asking for references.
+
+    Two auth modes:
+    - **Internal token** (the agent via scripts/references.sh): the chat
+      subprocess has no user JWT, so the runner passes a shared secret
+      (HARCOURTS_INTERNAL_TOKEN) + the chat user's email in `as_user`.
+      A matching token is trusted to act as that email. The token never
+      leaves Neo (env-only), mirroring how vaultre.sh holds its token.
+    - **JWT** (any future UI caller): standard bearer verification.
+    """
+    internal = os.environ.get("HARCOURTS_INTERNAL_TOKEN")
+    if x_internal_token and internal and x_internal_token == internal:
+        if not as_user:
+            raise HTTPException(
+                status_code=400,
+                detail="as_user is required with the internal token",
+            )
+        return as_user
+    token = extract_bearer(authorization)
+    try:
+        return authed_or_raise(token).email
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@router.get("/references", response_model=list[dict])
+def list_references(
+    consultant_slug: str = Query(..., max_length=64),
+    q: str | None = Query(
+        default=None, max_length=200,
+        description="Place/environment keyword — matched against the address.",
+    ),
+    limit: int = Query(default=5, ge=1, le=20),
+    as_user: str | None = Query(
+        default=None, max_length=200,
+        description="Email to scope to — only honoured with a valid internal token.",
+    ),
+    authorization: str | None = Header(default=None),
+    x_internal_token: str | None = Header(default=None),
+) -> list[dict]:
+    """Thumbs-up listings the agent may use as writing references for a
+    consultant.
+
+    Pool = the caller's OWN up-voted listings + any admin-promoted public
+    references (is_public_reference), for this consultant only. Newest
+    first; full body_md included so the agent can study tone + structure.
+
+    Per-user isolation is the whole point: a caller only ever sees their
+    own up-votes plus the shared public set — never another teammate's
+    private up-votes. Ungraded and down-voted listings never appear.
+
+    MUST stay declared before GET /{listing_id} — otherwise the UUID path
+    captures "references" and 422s.
+    """
+    caller_email = _references_caller_email(
+        authorization, x_internal_token, as_user,
+    )
+    sb = get_supabase()
+    # The caller's own up-voted listing ids.
+    try:
+        graded = (
+            sb.table("copypro_listing_grades")
+            .select("listing_id")
+            .eq("user_email", caller_email)
+            .eq("grade", "up")
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to public-only
+        log.warning("references: grade lookup failed: %s", exc)
+        graded = None
+    up_ids = [g["listing_id"] for g in (graded.data or [])] if graded else []
+
+    query = (
+        sb.table("copypro_listings")
+        .select(
+            "id,consultant_slug,address,headline,body_md,"
+            "is_public_reference,created_at"
+        )
+        .eq("consultant_slug", consultant_slug)
+    )
+    # Reference pool: caller's own up-votes OR any public reference.
+    if up_ids:
+        query = query.or_(
+            f"id.in.({','.join(up_ids)}),is_public_reference.eq.true"
+        )
+    else:
+        query = query.eq("is_public_reference", True)
+    if q:
+        query = query.ilike("address", f"%{q}%")
+    query = query.order("created_at", desc=True).limit(limit)
+    try:
+        resp = query.execute()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("references: query failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"references failed: {exc}") from exc
+    log.info(
+        "listings.references: user=%s consultant=%s q=%r -> %d",
+        caller_email, consultant_slug, q, len(resp.data or []),
+    )
     return resp.data or []
 
 
@@ -503,3 +616,35 @@ def clear_grade(
         raise HTTPException(status_code=500, detail=f"clear grade failed: {exc}") from exc
     log.info("listings.grade cleared: id=%s user=%s", listing_id, user.email)
     return _grade_summary(sb, str(listing_id), user.email)
+
+
+@router.post("/{listing_id}/public-reference", response_model=dict)
+def set_public_reference(
+    listing_id: UUID,
+    payload: PublicReferenceIn,
+    user: AuthedUser = Depends(require_auth),
+) -> dict:
+    """Admin-only: promote (or demote) a listing as a PUBLIC writing
+    reference. Once public, any teammate writing this consultant can have
+    the agent draw on it; until then it's a reference only for whoever
+    up-voted it. Non-admins get 403."""
+    if not _caller_sees_all(user):
+        raise HTTPException(status_code=403, detail="admin only")
+    sb = get_supabase()
+    try:
+        resp = (
+            sb.table("copypro_listings")
+            .update({"is_public_reference": payload.public})
+            .eq("id", str(listing_id))
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("listings.public-reference failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"update failed: {exc}") from exc
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="not found")
+    log.info(
+        "listings.public-reference: id=%s admin=%s public=%s",
+        listing_id, user.email, payload.public,
+    )
+    return resp.data[0]

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -245,6 +246,25 @@ def _chat_ui_context(consultant_slug: str, user_first_name: str = "") -> str:
         "    shared/* ARE in scope — those are durable persona docs, not "
         "    per-session state. Read them freely.\n"
         ""
+        "PHASE 3 WRITING REFERENCES — before writing the listing body, "
+        "pull this consultant's strongest past listings to anchor tone "
+        "and structure. Run `./scripts/references.sh` (no args) for the "
+        "most recent THUMBS-UP references for THIS consultant — listings "
+        "the team rated strong (the signed-in user's own up-votes, plus "
+        "any an admin promoted for everyone). To find a closer match by "
+        "setting, pass a place/environment keyword: "
+        "`./scripts/references.sh \"highland lake cabin\"` or "
+        "`./scripts/references.sh \"coastal\"`. If the user asks to lean "
+        "on a particular past listing, search for it the same way. Study "
+        "them for voice, rhythm and structure — NEVER copy sentences or "
+        "property-specific details across; each listing must describe its "
+        "own property truthfully. An empty result just means no "
+        "references yet — write from the brand guide as usual. Scope is "
+        "automatic and enforced server-side: you only ever see this "
+        "consultant's references for the signed-in user plus the "
+        "team-approved public set; you cannot reach another user's "
+        "private up-votes or another consultant's listings.\n"
+        ""
         "PHASE 5 — NO AUTO-DOCX, SAVE TO LISTINGS REPO INSTEAD. The "
         "old Phase 5 from shared/rules/workflow.md said 'generate a Word "
         "document at outputs/...docx'. That has CHANGED. The Word doc is "
@@ -390,6 +410,7 @@ async def stream_message(
     resume_session_id: str | None = None,
     claude_bin: str = "claude",
     user_first_name: str = "",
+    user_email: str = "",
 ) -> AsyncIterator[StreamEvent | StreamSummary]:
     """Async-iterate claude's stream-json events for one user turn.
 
@@ -465,6 +486,21 @@ async def stream_message(
     # single-event payload (HEIC-sized photos round-trip in well under
     # that) without burning resident memory in the steady state — the
     # buffer only grows as the reader actually reads.
+    # Subprocess environment: inherit ours, then add the bits scripts/
+    # references.sh needs to fetch this user's writing references —
+    # the internal token (already in our env via .env), the chat user's
+    # email to scope to, the active consultant, and the local backend URL.
+    # The subprocess has no user JWT, so this is how the reference fetch is
+    # authenticated + scoped without exposing a secret to the model.
+    subprocess_env = {
+        **os.environ,
+        "HARCOURTS_CHAT_USER_EMAIL": user_email,
+        "HARCOURTS_CONSULTANT_SLUG": consultant_folder.name,
+        "HARCOURTS_BACKEND_URL": os.environ.get(
+            "HARCOURTS_BACKEND_URL_INTERNAL", "http://127.0.0.1:8787",
+        ),
+    }
+
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.PIPE,
@@ -472,6 +508,7 @@ async def stream_message(
         stderr=asyncio.subprocess.PIPE,
         cwd=str(consultant_folder),
         limit=16 * 1024 * 1024,
+        env=subprocess_env,
     )
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
 
