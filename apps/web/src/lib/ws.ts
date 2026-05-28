@@ -735,6 +735,17 @@ export interface UploadedFile {
 // ngrok-skip headers through authHeaders().
 // ---------------------------------------------------------------------------
 
+export type Grade = "up" | "down";
+
+/** Thumbs up/down rollup for a listing. Returned by GET /api/listings/{id}
+ *  (as `grade_summary`) and by the PUT/DELETE grade endpoints. `my_grade`
+ *  is the current user's vote (null if they haven't graded). */
+export interface GradeSummary {
+  up: number;
+  down: number;
+  my_grade: Grade | null;
+}
+
 export interface ListingRow {
   id: string;
   user_email: string;
@@ -752,6 +763,7 @@ export interface ListingRow {
   created_at: string;
   updated_at: string;
   revisions?: ListingRevisionRow[];   // populated when include_revisions=true
+  grade_summary?: GradeSummary;        // present on GET /api/listings/{id}
 }
 
 export interface ListingRevisionRow {
@@ -887,6 +899,49 @@ export async function updateListing(
     throw new Error(`updateListing ${res.status}: ${detail || "failed"}`);
   }
   return (await res.json()) as ListingRow;
+}
+
+/** Set (or change) the current user's thumbs up/down on a listing.
+ *  Returns the fresh grade summary so the caller can update in place. */
+export async function gradeListing(
+  backendUrl: string,
+  listingId: string,
+  grade: Grade,
+  comment?: string | null,
+): Promise<GradeSummary> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/listings/${encodeURIComponent(listingId)}/grade`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      body: JSON.stringify({ grade, comment: comment ?? null }),
+    },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`gradeListing ${res.status}: ${detail || "failed"}`);
+  }
+  return (await res.json()) as GradeSummary;
+}
+
+/** Clear the current user's grade on a listing (un-vote). Idempotent. */
+export async function clearGrade(
+  backendUrl: string,
+  listingId: string,
+): Promise<GradeSummary> {
+  const res = await fetch(
+    `${backendUrl.replace(/\/$/, "")}/api/listings/${encodeURIComponent(listingId)}/grade`,
+    { method: "DELETE", headers: await authHeaders() },
+  );
+  if (!res.ok) {
+    let detail = "";
+    try { detail = ((await res.json()) as { detail?: string }).detail || ""; }
+    catch { detail = res.statusText; }
+    throw new Error(`clearGrade ${res.status}: ${detail || "failed"}`);
+  }
+  return (await res.json()) as GradeSummary;
 }
 
 export async function uploadFiles(

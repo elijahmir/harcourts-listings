@@ -27,6 +27,7 @@ in case anyone ever talks to Supabase from the Sales App directly.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -95,6 +96,18 @@ class ListingUpdate(BaseModel):
     )
 
 
+class GradeIn(BaseModel):
+    """Inbound shape for PUT /api/listings/{id}/grade.
+
+    A grade is one teammate's thumbs up/down on a saved listing, plus an
+    optional note. One grade per (listing, user) — re-grading upserts.
+    The aggregate of these is what the admin review page will eventually
+    read to spot the listings the team rates strongest.
+    """
+    grade: str = Field(..., pattern="^(up|down)$")
+    comment: str | None = Field(None, max_length=2000)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -132,6 +145,34 @@ def _caller_sees_all(user: AuthedUser) -> bool:
     failures fail closed (return False) — strict by default.
     """
     return is_admin_email(user.email)
+
+
+def _grade_summary(sb: Any, listing_id: str, caller_email: str) -> dict:
+    """Aggregate up/down counts for a listing plus the caller's own grade.
+
+    Best-effort: any failure returns zeros and my_grade=None so a missing
+    grades table or a transient error never breaks a listing read. The
+    backend uses the service-role key, so this sees every grade regardless
+    of RLS — counts are global, my_grade is the caller's row only.
+    """
+    try:
+        resp = (
+            sb.table("copypro_listing_grades")
+            .select("grade,user_email")
+            .eq("listing_id", listing_id)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade gracefully
+        log.warning("grade summary failed for %s: %s", listing_id, exc)
+        return {"up": 0, "down": 0, "my_grade": None}
+    rows = resp.data or []
+    up = sum(1 for r in rows if r.get("grade") == "up")
+    down = sum(1 for r in rows if r.get("grade") == "down")
+    mine = next(
+        (r.get("grade") for r in rows if r.get("user_email") == caller_email),
+        None,
+    )
+    return {"up": up, "down": down, "my_grade": mine}
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +297,7 @@ def get_listing(
         except Exception as exc:  # noqa: BLE001
             log.warning("listings.get revisions failed: %s", exc)
             listing["revisions"] = []
+    listing["grade_summary"] = _grade_summary(sb, str(listing_id), user.email)
     return listing
 
 
@@ -341,3 +383,94 @@ def update_listing(
         listing_id, user.email, list(updates.keys()),
     )
     return resp.data[0]
+
+
+def _listing_visible_or_404(sb: Any, listing_id: UUID, user: AuthedUser) -> str:
+    """Confirm the listing exists and the caller may see it; return its
+    owner email. 404 (not 403) on miss so existence never leaks. Shared
+    by the grade routes — same ownership rule as get/patch."""
+    try:
+        existing = (
+            sb.table("copypro_listings")
+            .select("user_email")
+            .eq("id", str(listing_id))
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("listing visibility check failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"grade failed: {exc}") from exc
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="not found")
+    owner_email = existing.data[0].get("user_email")
+    if owner_email != user.email and not _caller_sees_all(user):
+        raise HTTPException(status_code=404, detail="not found")
+    return owner_email
+
+
+@router.put("/{listing_id}/grade", response_model=dict)
+def grade_listing(
+    listing_id: UUID,
+    payload: GradeIn,
+    user: AuthedUser = Depends(require_auth),
+) -> dict:
+    """Set (or change) the caller's thumbs up/down on a listing.
+
+    Upserts on (listing_id, user_id) so re-grading overwrites the caller's
+    prior vote rather than stacking. Returns the fresh grade summary
+    (global up/down counts + the caller's grade) so the UI can update in
+    one round-trip.
+    """
+    user_id = _require_uuid_user_sub(user)
+    sb = get_supabase()
+    _listing_visible_or_404(sb, listing_id, user)
+
+    row = {
+        "listing_id": str(listing_id),
+        "user_id": str(user_id),
+        "user_email": user.email,
+        "grade": payload.grade,
+        "comment": payload.comment,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        sb.table("copypro_listing_grades").upsert(
+            row, on_conflict="listing_id,user_id",
+        ).execute()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("listings.grade upsert failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"grade failed: {exc}") from exc
+
+    log.info(
+        "listings.grade: id=%s user=%s grade=%s",
+        listing_id, user.email, payload.grade,
+    )
+    return _grade_summary(sb, str(listing_id), user.email)
+
+
+@router.delete("/{listing_id}/grade", response_model=dict)
+def clear_grade(
+    listing_id: UUID,
+    user: AuthedUser = Depends(require_auth),
+) -> dict:
+    """Remove the caller's grade on a listing (un-vote / toggle off).
+
+    Idempotent: deleting a grade that doesn't exist still returns the
+    (now grade-free) summary rather than 404, so a double-tap is harmless.
+    """
+    user_id = _require_uuid_user_sub(user)
+    sb = get_supabase()
+    _listing_visible_or_404(sb, listing_id, user)
+    try:
+        (
+            sb.table("copypro_listing_grades")
+            .delete()
+            .eq("listing_id", str(listing_id))
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("listings.grade delete failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"clear grade failed: {exc}") from exc
+    log.info("listings.grade cleared: id=%s user=%s", listing_id, user.email)
+    return _grade_summary(sb, str(listing_id), user.email)
