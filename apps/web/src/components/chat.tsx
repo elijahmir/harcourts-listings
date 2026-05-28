@@ -198,6 +198,23 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
   // re-renders the instant the first turn finishes.
   const [sessionId, setSessionIdState] = useState<string | null>(null);
 
+  // Persisted "this session already saved a listing" marker. listingSaveState
+  // above is per-render and resets on reload / navigation, which flipped the
+  // button back to "Save as listing" and risked a duplicate save. We mirror
+  // the saved listing-id into localStorage keyed by session and rehydrate it
+  // here, so the button stays "View listing" across navigation. (The backend
+  // also dedups on session+address, so even a stale click can't duplicate.)
+  const [savedListingId, setSavedListingId] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined" || !sessionId) {
+      setSavedListingId(null);
+      return;
+    }
+    setSavedListingId(
+      window.localStorage.getItem(`harcourts-listing-saved:${sessionId}`),
+    );
+  }, [sessionId]);
+
   // Load consultant list + restore last selection on first mount.
   // Session-id precedence (highest first):
   //   1. `?s=<id>` from the URL  ← refresh-safe / shareable deep link
@@ -616,6 +633,14 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
         signboardBlurb: extracted.signboardBlurb,
       });
       setListingSaveState((prev) => ({ ...prev, [messageId]: row.id }));
+      // Persist so the saved state survives reload / navigation. Keyed by
+      // session because one chat produces one listing for one property.
+      if (typeof window !== "undefined" && sessionId) {
+        window.localStorage.setItem(
+          `harcourts-listing-saved:${sessionId}`, row.id,
+        );
+      }
+      setSavedListingId(row.id);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setListingSaveState((prev) => ({
@@ -727,6 +752,7 @@ export function Chat({ userName, backendUrl, headerSlot }: ChatProps) {
                     onSubmitSave={(args) => handleSaveLearning(m.id, args)}
                     defaultTrigger={triggerForMessage.get(m.id) ?? ""}
                     listingSaveState={listingSaveState[m.id]}
+                    savedListingId={savedListingId}
                     onSaveListing={(extracted) => handleSaveListing(m.id, extracted)}
                     isLastInGroup={isLastInGroup}
                     isFirstInGroup={isFirstInGroup}
@@ -1239,6 +1265,10 @@ interface MessageBubbleProps {
    *  the parent. undefined = idle, "saving" = in-flight, "<uuid>" =
    *  saved, "error:..." = failed. */
   listingSaveState?: string;
+  /** Listing-id saved for the CURRENT session, rehydrated from
+   *  localStorage. Lets a listing-shaped message show "View listing"
+   *  after navigation even though per-render listingSaveState was lost. */
+  savedListingId?: string | null;
   onSaveListing: (extracted: ExtractedListing) => Promise<void>;
   /** True when this message is the last in a consecutive run from the
    *  same role. Drives avatar visibility — only the trailing bubble
@@ -1265,8 +1295,16 @@ interface MessageBubbleProps {
 //   "saved as foo.jpg"     — friendlier prompt-engineered style
 // Extensions match the backend allow-list. Keep these in sync; mismatch
 // means a chip renders but the click 400s.
+// Image extensions (jpg/jpeg/png/webp) are deliberately EXCLUDED. In the
+// CopyPro workflow images are session INPUTS — VaultRE photos and floor
+// plans the agent downloads and narrates inline ("(allfloors…withdim.png)",
+// "it's vaultre-203524095.jpg"). Those live in the session folder, not
+// outputs/, so an auto-chip would 404 the moment it's tapped. The only
+// files the agent actually delivers are documents (.docx export, the odd
+// pdf/csv/txt/md), so only those get a chip. The backend still serves
+// images on request if a future flow ever needs one.
 const DOWNLOADABLE_EXT_RE =
-  /(?:outputs\/)?([A-Za-z0-9][A-Za-z0-9._\-]*\.(?:docx|pdf|csv|txt|md|jpe?g|png|webp))\b/gi;
+  /(?:outputs\/)?([A-Za-z0-9][A-Za-z0-9._\-]*\.(?:docx|pdf|csv|txt|md))\b/gi;
 
 function extractOutputFilenames(text: string): string[] {
   const seen = new Set<string>();
@@ -1326,20 +1364,35 @@ function extractSection(text: string, heading: string): string | null {
   return body || null;
 }
 
+// Matches the trailing UI-cue line the Phase-5 prompt used to ask the
+// agent to emit ("Tap "Save as listing" below to add this…"). We strip
+// it from the saved body so it never lands in the listings repo. Tolerant
+// of curly/straight quotes and minor wording drift.
+const SAVE_AS_LISTING_CUE_RE = /^.*tap\s+["“]?save as listing["”]?.*$/gim;
+
 function extractListingFromMessage(text: string): ExtractedListing | null {
   const addressMatch = text.match(/^\*\*Address:\*\*\s*(.+)$/m);
   if (!addressMatch) return null;
   const address = addressMatch[1].trim();
   if (!address) return null;
+  // Require the FULL Phase-5 shape, not just an Address line. A Phase-2
+  // Sales Agent Briefing bolds an Address in its Property Snapshot, which
+  // previously made "Save as listing" wrongly appear on the briefing. The
+  // real consolidated listing always carries a **Headline:** frontmatter
+  // line AND a "## Listing" section — gate on all three.
   const headlineMatch = text.match(/^\*\*Headline:\*\*\s*(.+)$/m);
-  const headline = headlineMatch ? headlineMatch[1].trim() : null;
-  // bodyMd = the whole message minus the two frontmatter lines, trimmed.
-  // We keep the section headings (## Listing, etc) intact because they
-  // round-trip nicely back to a Word doc on demand.
-  const bodyMd = text
-    .replace(/^\*\*Address:\*\*.*$/m, "")
-    .replace(/^\*\*Headline:\*\*.*$/m, "")
-    .trim();
+  const listingSection = extractSection(text, "Listing");
+  if (!headlineMatch || !listingSection) return null;
+  const headline = headlineMatch[1].trim();
+  // bodyMd = the structured content from the first "## " heading onward,
+  // stripped of the trailing UI cue. Starting at the first heading drops
+  // the conversational preamble ("Approved. Here's the consolidated
+  // listing.") and the frontmatter, so the listings repo stores clean
+  // markdown that still round-trips to a Word doc (headings intact).
+  let bodyMd = text;
+  const firstHeading = /^##\s+/m.exec(bodyMd);
+  if (firstHeading) bodyMd = bodyMd.slice(firstHeading.index);
+  bodyMd = bodyMd.replace(SAVE_AS_LISTING_CUE_RE, "").trim();
   if (bodyMd.length < 10) return null; // sanity guard
   return {
     address,
@@ -1364,6 +1417,7 @@ function MessageBubble({
   onCancelSave,
   onSubmitSave,
   listingSaveState,
+  savedListingId,
   onSaveListing,
   isLastInGroup,
   isFirstInGroup,
@@ -1389,6 +1443,13 @@ function MessageBubble({
         : null,
     [isUser, message.streaming, message.text],
   );
+  // Effective save state: the live per-render state wins; otherwise, if
+  // this message is listing-shaped and the session already saved a
+  // listing, fall back to that id so the button stays "View listing"
+  // after a reload / navigation instead of inviting a duplicate save.
+  const effectiveListingSaveState =
+    listingSaveState ??
+    (extractedListing && savedListingId ? savedListingId : undefined);
 
   return (
     <li
@@ -1517,7 +1578,21 @@ function MessageBubble({
             clean during quick reads while still letting the user copy
             without a long-press. */}
         {!isUser && !message.streaming && message.text.length > 0 && (
-          <div className="mt-1 flex flex-wrap items-center gap-1 self-start">
+          <div
+            className={cn(
+              "mt-1 flex flex-wrap items-center gap-1 self-start transition-all",
+              // Last bubble of a run: actions always visible. Consecutive
+              // (non-last) bubbles collapse to nothing and reveal on hover,
+              // so a long agent run reads clean instead of stacking a
+              // "Save as voice rule / Copy / timestamp" row under every
+              // line. Collapsing height (not just opacity) is what removes
+              // the gaps. Touch devices (no hover) keep them visible so the
+              // actions stay reachable.
+              isLastInGroup
+                ? "opacity-100"
+                : "max-h-0 overflow-hidden opacity-0 group-hover:max-h-12 group-hover:opacity-100 [@media(hover:none)]:max-h-12 [@media(hover:none)]:opacity-100",
+            )}
+          >
             {canSave && !editing && !saved && (
               <button
                 type="button"
@@ -1534,9 +1609,11 @@ function MessageBubble({
                 Saved to learnings
               </span>
             )}
-            {/* Save-as-listing button — only renders for messages
-                shaped like a final listing (Address: frontmatter). */}
-            {extractedListing && !listingSaveState && (
+            {/* Save-as-listing button — only renders for a listing-shaped
+                message that hasn't been saved yet (live OR persisted). Once
+                saved it swaps to the "View listing" link below, so a
+                re-click can't fire a duplicate save. */}
+            {extractedListing && !effectiveListingSaveState && (
               <button
                 type="button"
                 onClick={() => onSaveListing(extractedListing)}
@@ -1553,16 +1630,16 @@ function MessageBubble({
                 Saving listing…
               </span>
             )}
-            {listingSaveState &&
-              listingSaveState !== "saving" &&
-              !listingSaveState.startsWith("error:") && (
+            {effectiveListingSaveState &&
+              effectiveListingSaveState !== "saving" &&
+              !effectiveListingSaveState.startsWith("error:") && (
                 <a
-                  href={`/dashboard/listings/${listingSaveState}`}
+                  href={`/dashboard/listings/${effectiveListingSaveState}`}
                   className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-emerald-600 hover:underline dark:text-emerald-500"
                   title="Open in the listings repo"
                 >
                   <BookmarkPlus className="h-3.5 w-3.5" />
-                  Saved to listings →
+                  View listing →
                 </a>
               )}
             {listingSaveState?.startsWith("error:") && (

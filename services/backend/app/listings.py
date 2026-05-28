@@ -184,9 +184,38 @@ def create_listing(
     payload: ListingCreate,
     user: AuthedUser = Depends(require_auth),
 ) -> dict:
-    """Save a CopyPro chat's final listing to Supabase. Returns the new row."""
+    """Save a CopyPro chat's final listing to Supabase. Returns the new row.
+
+    Idempotent on (chat_session_id, address_slug, user_id): the chat's
+    "Save as listing" button has only per-render state, so it resets on
+    reload / navigation and a teammate can tap it again. Rather than
+    insert a duplicate, we return the existing row — so a re-save is a
+    safe no-op that lands the user back on the same listing.
+    """
     user_id = _require_uuid_user_sub(user)
     sb = get_supabase()
+
+    try:
+        existing = (
+            sb.table("copypro_listings")
+            .select("*")
+            .eq("chat_session_id", payload.chat_session_id)
+            .eq("address_slug", payload.address_slug)
+            .eq("user_id", str(user_id))
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 — dedup is best-effort
+        log.warning("listings.create dedup precheck failed: %s", exc)
+        existing = None
+    if existing and existing.data:
+        log.info(
+            "listings.create dedup hit: session=%s address=%s -> existing id=%s",
+            payload.chat_session_id, payload.address_slug,
+            existing.data[0].get("id"),
+        )
+        return existing.data[0]
+
     row = {
         "user_id": str(user_id),
         "user_email": user.email,
