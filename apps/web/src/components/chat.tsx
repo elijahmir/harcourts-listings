@@ -1683,12 +1683,22 @@ function MessageBubble({
                   try {
                     await downloadOutput(backendUrl, filename);
                   } catch (err) {
-                    // Inline the error in the chat-relative space so the
-                    // user sees what went wrong (file gone, auth lapsed,
-                    // network). alert() is intentionally chosen for
-                    // simplicity — this is a rare path.
+                    // alert() is intentional here — a rare path. A bare
+                    // "Failed to fetch" means the fetch rejected before any
+                    // response: the connection dropped mid-transfer, which
+                    // big files over the tunnel are prone to. Say that in
+                    // plain English and point at the fix (lighter file)
+                    // rather than dumping the raw error.
+                    const raw =
+                      err instanceof Error ? err.message : String(err);
+                    const isNetwork =
+                      /failed to fetch|load failed|networkerror|network request failed/i.test(
+                        raw,
+                      );
                     alert(
-                      err instanceof Error ? err.message : String(err),
+                      isNetwork
+                        ? "That download didn't complete — the file may be too large for the current connection. Try again, or ask me for a lighter version."
+                        : `Couldn't download ${filename}: ${raw}`,
                     );
                   }
                 }}
