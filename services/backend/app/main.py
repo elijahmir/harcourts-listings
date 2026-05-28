@@ -319,7 +319,7 @@ app.add_middleware(
     # to be the specific origin echoed back, which the regex above lets
     # CORSMiddleware do automatically.
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "PATCH"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
     allow_headers=["*"],
 )
 
