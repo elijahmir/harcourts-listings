@@ -94,6 +94,16 @@ def _chat_ui_context(consultant_slug: str, user_first_name: str = "") -> str:
         "Token scope is read-only (advertising.read, contact.read, "
         "property.read) — push-back / write operations genuinely are "
         "not available; that's the only honest 'can't' here.\n"
+        "WHERE PHOTOS GO — download VaultRE photos (and any per-listing "
+        "input files) into the SESSION's own photo folder, never outputs/. "
+        "The path is in the env var $HARCOURTS_SESSION_PHOTOS_DIR; "
+        "`mkdir -p \"$HARCOURTS_SESSION_PHOTOS_DIR\"` then "
+        "`./scripts/vaultre.sh download <propertyId> "
+        "\"$HARCOURTS_SESSION_PHOTOS_DIR\"`. Photos are session INPUTS — "
+        "keeping them in the session folder means they're attributed to "
+        "the session and cleaned up automatically when it's deleted, and "
+        "they never show stray download chips. outputs/ is ONLY for the "
+        "final deliverable the user downloads (the .docx).\n"
         ""
         "HIDE IMPLEMENTATION PATHS — speak about WHAT, not WHERE. The "
         "user is a real-estate consultant on a phone, not a developer. "
@@ -445,6 +455,7 @@ async def stream_message(
     claude_bin: str = "claude",
     user_first_name: str = "",
     user_email: str = "",
+    session_id: str = "",
 ) -> AsyncIterator[StreamEvent | StreamSummary]:
     """Async-iterate claude's stream-json events for one user turn.
 
@@ -527,6 +538,16 @@ async def stream_message(
     # email to scope to, the active consultant, and the local backend URL.
     # The subprocess has no user JWT, so this is how the reference fetch is
     # authenticated + scoped without exposing a secret to the model.
+    # The session's own photo folder (keyed by session id) is where the
+    # agent should drop VaultRE photos and other per-listing inputs —
+    # NOT outputs/. Keeping inputs here means they're exactly attributable
+    # to the session and get cleaned up when it's deleted; outputs/ is
+    # reserved for the final downloadable deliverable (the .docx).
+    session_photos_dir = ""
+    if session_id:
+        session_photos_dir = str(
+            consultant_folder / "sessions" / f"session-{session_id[:8]}" / "photos"
+        )
     subprocess_env = {
         **os.environ,
         "HARCOURTS_CHAT_USER_EMAIL": user_email,
@@ -534,6 +555,7 @@ async def stream_message(
         "HARCOURTS_BACKEND_URL": os.environ.get(
             "HARCOURTS_BACKEND_URL_INTERNAL", "http://127.0.0.1:8787",
         ),
+        "HARCOURTS_SESSION_PHOTOS_DIR": session_photos_dir,
     }
 
     proc = await asyncio.create_subprocess_exec(

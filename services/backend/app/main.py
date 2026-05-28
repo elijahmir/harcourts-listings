@@ -1115,6 +1115,7 @@ async def chat_ws(websocket: WebSocket) -> None:
                     claude_bin=settings.claude_bin,
                     user_first_name=user_first_name,
                     user_email=user_name,
+                    session_id=session_id,
                 ):
                     if isinstance(ev, StreamSummary):
                         # End-of-turn safety net: if nothing landed in
