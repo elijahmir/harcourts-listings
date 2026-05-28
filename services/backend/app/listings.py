@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -383,19 +384,45 @@ def list_references(
         )
     else:
         query = query.eq("is_public_reference", True)
-    if q:
-        query = query.ilike("address", f"%{q}%")
-    query = query.order("created_at", desc=True).limit(limit)
+    # Fetch a generous recent pool, then rank in Python. We deliberately do
+    # NOT filter by q in SQL: q describes the SETTING (e.g. "highland lake
+    # fishing cabin"), which lives in body_md — a whole-phrase ilike on the
+    # address matched nothing, so an environment search wrongly returned 0
+    # even when a perfect reference existed.
+    pool_limit = max(limit * 4, 30)
+    query = query.order("created_at", desc=True).limit(pool_limit)
     try:
-        resp = query.execute()
+        rows = query.execute().data or []
     except Exception as exc:  # noqa: BLE001
         log.exception("references: query failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"references failed: {exc}") from exc
+
+    if q:
+        keywords = [w for w in re.split(r"[^a-z0-9]+", q.lower()) if len(w) > 2]
+
+        def _score(r: dict) -> int:
+            hay = (
+                (r.get("address") or "") + " " + (r.get("body_md") or "")
+            ).lower()
+            return sum(1 for kw in keywords if kw in hay)
+
+        ranked = sorted(
+            rows,
+            key=lambda r: (_score(r), r.get("created_at") or ""),
+            reverse=True,
+        )
+        matched = [r for r in ranked if _score(r) > 0]
+        # Prefer keyword matches; if none match, fall back to recent so the
+        # agent always gets something to anchor on rather than an empty set.
+        rows = (matched or ranked)[:limit]
+    else:
+        rows = rows[:limit]
+
     log.info(
         "listings.references: user=%s consultant=%s q=%r -> %d",
-        caller_email, consultant_slug, q, len(resp.data or []),
+        caller_email, consultant_slug, q, len(rows),
     )
-    return resp.data or []
+    return rows
 
 
 @router.get("/admin-overview", response_model=list[dict])
