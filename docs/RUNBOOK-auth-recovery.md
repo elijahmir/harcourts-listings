@@ -68,14 +68,14 @@ Only the **plain interactive `claude` login** ("Claude account" picker) requests
 
 ---
 
-## Prevention (set up once)
+## Prevention (already set up)
 
-These reduce the chance you ever need the fix above. See the matching launchd jobs in `scripts/launchd/`.
+1. **Auto-restart on reboot/crash/sleep** — handled by the **system LaunchDaemons** in `/Library/LaunchDaemons` (installed via `~/srv/install-daemon.sh`): `com.copypro.backend`, `com.copypro.ngrok`, `com.harcourts.pm.backend`, `com.harcourts.pm.tunnel`. They run as `eli`, `RunAtLoad` + `KeepAlive`, **independent of who is logged in**. To reload them: `sudo bash ~/srv/recover.sh`.
+2. **Keep-warm token refresh** — `com.copypro.keepwarm` (per-user LaunchAgent) runs `claude --print` every ~4 hours as `eli`, refreshing the login token before its ~8-hour expiry so it never dies idle. Logs to `logs/keepwarm.log` (every line should say `ok: pong`).
+3. **Health monitor** — `com.copypro.healthcheck` (per-user LaunchAgent) checks `/healthz` + console user + tunnel every 30 min; logs failures to `logs/healthcheck.log`.
+4. **Keep `eli` as the console user** on Neo. The keep-warm refresh needs `eli`'s login-session keychain; if Neo switches to another user, refresh stops working and you're back to a manual login.
 
-1. **Auto-restart on reboot/crash** — `com.copypro.backend` + the ngrok tunnel run under launchd with `KeepAlive`, so a reboot no longer takes CopyPro down.
-2. **Keep-warm token refresh** — `com.copypro.keepwarm` runs `claude --print ping` every ~4 hours as `eli`, refreshing the login token before its 8-hour expiry so it never dies idle.
-3. **Health monitor** — `com.copypro.healthcheck` checks `/healthz` + auth every 30 min and logs failures to `~/srv/harcourts-listings/logs/healthcheck.log` so you find out in minutes, not a day.
-4. **Keep `eli` as the console user** on Neo. If it switches to another user, token refresh stops working.
+Deploy details for the two per-user agents: `scripts/launchd/README.md`.
 
 ## The zero-expiry alternative
 
