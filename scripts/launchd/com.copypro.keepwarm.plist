@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Refreshes the Claude login token every 4h so it never expires idle.
+     Also a once-per-4h auth canary (logs ALERT if auth has broken). -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.copypro.keepwarm</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/eli/srv/harcourts-listings/scripts/launchd/keepwarm.sh</string>
+  </array>
+  <key>StartInterval</key><integer>14400</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/eli/srv/harcourts-listings/logs/keepwarm.log</string>
+  <key>StandardErrorPath</key><string>/Users/eli/srv/harcourts-listings/logs/keepwarm.log</string>
+</dict></plist>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Checks backend /healthz + console user + tunnel every 30 min.
+     Logs failures to logs/healthcheck.log so an outage is noticed in minutes. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.copypro.healthcheck</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>/Users/eli/srv/harcourts-listings/scripts/launchd/healthcheck.sh</string>
+  </array>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>/Users/eli/srv/harcourts-listings/logs/healthcheck.log</string>
+</dict></plist>
