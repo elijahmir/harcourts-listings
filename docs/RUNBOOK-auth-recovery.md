@@ -72,7 +72,7 @@ Only the **plain interactive `claude` login** ("Claude account" picker) requests
 
 1. **Auto-restart on reboot/crash/sleep** — handled by the **system LaunchDaemons** in `/Library/LaunchDaemons` (installed via `~/srv/install-daemon.sh`): `com.copypro.backend`, `com.copypro.ngrok`, `com.harcourts.pm.backend`, `com.harcourts.pm.tunnel`. They run as `eli`, `RunAtLoad` + `KeepAlive`, **independent of who is logged in**. To reload them: `sudo bash ~/srv/recover.sh`.
 2. **Keep-warm token refresh** — `com.copypro.keepwarm` (per-user LaunchAgent) runs `claude --print` every ~4 hours as `eli`, refreshing the login token before its ~8-hour expiry so it never dies idle. Logs to `logs/keepwarm.log` (every line should say `ok: pong`).
-3. **Health monitor** — `com.copypro.healthcheck` (per-user LaunchAgent) checks `/healthz` + console user + tunnel every 30 min; logs failures to `logs/healthcheck.log`.
+3. **Health monitor** — `com.copypro.healthcheck` (**system** LaunchDaemon, runs regardless of login) checks `/healthz` + console user + tunnel every 30 min; logs failures to `logs/healthcheck.log`. A `console != eli` line is the early warning that the token is about to fail.
 4. **Keep `eli` as the console user** on Neo. The keep-warm refresh needs `eli`'s login-session keychain; if Neo switches to another user, refresh stops working and you're back to a manual login.
 
 Deploy details for the two per-user agents: `scripts/launchd/README.md`.

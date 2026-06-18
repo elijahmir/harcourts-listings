@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Checks backend /healthz + console user + tunnel every 30 min.
-     Logs failures to logs/healthcheck.log so an outage is noticed in minutes. -->
+<!-- SYSTEM LaunchDaemon: install to /Library/LaunchDaemons (needs sudo).
+     Runs as eli but at the SYSTEM level, so it monitors regardless of who is
+     logged in (matching the backend/tunnel daemons). Checks backend /healthz +
+     console user + tunnel every 30 min; logs failures to logs/healthcheck.log.
+     The console-user check is the early warning that the Claude token is about
+     to fail (refresh needs eli logged in). See scripts/launchd/README.md. -->
 <plist version="1.0"><dict>
   <key>Label</key><string>com.copypro.healthcheck</string>
+  <key>UserName</key><string>eli</string>
   <key>ProgramArguments</key><array>
     <string>/bin/bash</string>
     <string>/Users/eli/srv/harcourts-listings/scripts/launchd/healthcheck.sh</string>
