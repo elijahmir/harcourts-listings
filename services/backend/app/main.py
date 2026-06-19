@@ -1166,13 +1166,13 @@ async def chat_ws(websocket: WebSocket) -> None:
                 ):
                     if isinstance(ev, StreamSummary):
                         # Fatal-error safety net: the failure may arrive only
-                        # via a non-zero exit / stderr (no stdout "text" event)
-                        # — e.g. the CLI dies on auth before printing anything.
-                        # If so, show the friendly notice instead of an empty
-                        # bubble or a raw stderr dump.
+                        # via stderr (no stdout "text" event) — e.g. the CLI
+                        # dies on auth before printing anything. Trigger ONLY on
+                        # a confirmed auth/billing/overload SIGNATURE (not a
+                        # generic is_error / non-zero rc), so we never clobber a
+                        # real answer or one the jsonl fallback could recover.
                         if not fatal_handled and (
-                            ev.is_error
-                            or _detect_fatal(ev.error_message)
+                            _detect_fatal(ev.error_message)
                             or _detect_fatal(getattr(ev, "stderr_tail", ""))
                         ):
                             log.warning(
