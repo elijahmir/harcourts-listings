@@ -53,6 +53,49 @@ from .uploads import router as uploads_router
 _SUSPICIOUS_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = []
 
 
+# --- Friendly fatal-error handling -----------------------------------------
+# The `claude` CLI prints auth/billing/overload failures to stdout as if they
+# were the assistant's reply (e.g. "Failed to authenticate. API Error: 401
+# Invalid bearer token"). Left alone, that scary text lands in the user's chat
+# as a normal bubble. We detect those signatures and REPLACE the raw text with
+# a calm, admin-directed message — while logging the REAL error server-side so
+# the operator sees the true cause. See docs/RUNBOOK-auth-recovery.md.
+import re as _re_fatal
+
+_FATAL_SIGNATURES = _re_fatal.compile(
+    r"(invalid bearer token"
+    r"|failed to authenticate"
+    r"|api error:\s*401"
+    r"|authentication_error"
+    r"|invalid x-api-key"
+    r"|not logged in"
+    r"|please run\s*/?login"
+    r"|oauth token has expired"
+    r"|credit balance is too low"
+    r"|insufficient[_ ]quota"
+    r"|billing"
+    r"|overloaded_error"
+    r"|api error:\s*529"
+    r"|api error:\s*5\d\d)",
+    _re_fatal.IGNORECASE,
+)
+
+# What the user sees instead of the raw error. Kept warm + actionable: it tells
+# them it's a temporary system issue needing the admin/tech team, and that
+# nothing they did is lost.
+_FATAL_USER_MESSAGE = (
+    "⚠️ Quick hiccup — CopyPro can't respond right now and needs a fast fix "
+    "from your admin or tech team. Please give them a heads-up. Nothing you've "
+    "entered is lost, and you can pick up right where you left off once it's back."
+)
+
+
+def _detect_fatal(text: str | None) -> bool:
+    """True if `text` looks like a CLI auth/billing/overload failure that
+    should be shown to the user as a friendly notice rather than raw."""
+    return bool(text) and bool(_FATAL_SIGNATURES.search(text))
+
+
 def _compile_suspicious_patterns() -> None:
     """Lazy compile so the import isn't at module load time."""
     import re as _re
@@ -1020,6 +1063,10 @@ async def chat_ws(websocket: WebSocket) -> None:
             # turn's tokens/cost — see flush_block below).
             current_block_text = ""
             blocks_committed = 0
+            # Set once we've swapped a raw CLI auth/billing/overload error for
+            # the friendly notice, so we don't also flush the scary raw text or
+            # double-report it at end-of-turn.
+            fatal_handled = False
 
             # The claude subprocess can take 15–30s for image-heavy turns.
             # If the WebSocket drops mid-stream (mobile Safari backgrounding,
@@ -1118,6 +1165,26 @@ async def chat_ws(websocket: WebSocket) -> None:
                     session_id=session_id,
                 ):
                     if isinstance(ev, StreamSummary):
+                        # Fatal-error safety net: the failure may arrive only
+                        # via a non-zero exit / stderr (no stdout "text" event)
+                        # — e.g. the CLI dies on auth before printing anything.
+                        # If so, show the friendly notice instead of an empty
+                        # bubble or a raw stderr dump.
+                        if not fatal_handled and (
+                            ev.is_error
+                            or _detect_fatal(ev.error_message)
+                            or _detect_fatal(getattr(ev, "stderr_tail", ""))
+                        ):
+                            log.warning(
+                                "fatal CLI error at end-of-turn for session=%s: "
+                                "rc=%s msg=%s stderr=%s",
+                                session_id, getattr(ev, "return_code", "?"),
+                                (ev.error_message or "")[:200],
+                                getattr(ev, "stderr_tail", "")[:200],
+                            )
+                            current_block_text = _FATAL_USER_MESSAGE
+                            fatal_handled = True
+
                         # End-of-turn safety net: if nothing landed in
                         # current_block_text AND no blocks were
                         # committed (so the chat would show empty),
@@ -1205,7 +1272,24 @@ async def chat_ws(websocket: WebSocket) -> None:
                     # arrives, we flush the current text as its own DB
                     # row and reset.
                     if ev.text and ev.kind in ("text_delta", "text_full"):
-                        current_block_text = ev.text
+                        # Fatal-error guard: if the CLI leaked an auth/billing/
+                        # overload failure as "assistant text", swap it for the
+                        # friendly notice and log the real error. Once handled,
+                        # ignore further text on this turn so the raw error
+                        # can't slip through a later delta.
+                        if not fatal_handled and _detect_fatal(ev.text):
+                            log.warning(
+                                "fatal CLI error suppressed for session=%s: %s",
+                                session_id, ev.text.strip()[:300],
+                            )
+                            # Swap the scary text for the friendly notice; it
+                            # flushes as a normal assistant bubble. The end-of-
+                            # turn `done` frame still fires to stop streaming.
+                            current_block_text = _FATAL_USER_MESSAGE
+                            fatal_handled = True
+                        elif not fatal_handled:
+                            current_block_text = ev.text
+                        # if fatal_handled: keep the friendly text, drop the rest
 
                     if ev.kind == "tool_use":
                         # Bubble boundary: commit whatever's currently
