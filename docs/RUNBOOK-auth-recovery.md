@@ -77,6 +77,26 @@ Only the **plain interactive `claude` login** ("Claude account" picker) requests
 
 Deploy details for the two per-user agents: `scripts/launchd/README.md`.
 
+## Diagnostic error codes (what users send you)
+
+When the `claude` CLI fails, both apps now show the user a calm notice with a
+copyable code instead of the raw error — e.g. `CP-AUTH-01 · session 6f3a2c ·
+2026-06-19 10:14`. `CP` = CopyPro/Sales App, `PM` = Copilot/PM App. The real
+error is in the backend log; grep it by the session prefix:
+`grep 6f3a2c ~/srv/harcourts-listings/logs/daemon-backend.log`.
+
+| Code | Means | What to do |
+|---|---|---|
+| `*-AUTH-01` | Claude login token invalid / expired / missing | Re-login on Neo (the TL;DR fix above) |
+| `*-BILL-01` | Subscription credit / quota exhausted | Check the Claude plan / Agent-SDK pool |
+| `*-LOAD-01` | Anthropic overloaded (529 / 5xx) | Transient — ask the user to retry in a minute |
+| `*-NET-01` | Backend / tunnel unreachable or timing out | Check the system daemon + ngrok/cloudflare tunnel |
+| `*-UNK-01` | Unclassified failure | grep the log by the session prefix for the full error |
+
+Classifier + code builder: CopyPro `services/backend/app/main.py` (`_classify_fatal`
+/ `_fatal_notice`), PM `harcourts-docusign/backend/app/live.py`. The codes are
+the same scheme across both apps.
+
 ## The zero-expiry alternative
 
 If subscription auth keeps being fragile, switch the `claude` auth to an **API key**: create one at `console.anthropic.com`, put `ANTHROPIC_API_KEY=sk-ant-...` in `~/srv/harcourts-listings/.env`, restart the backend. It never expires and needs no GUI/keychain — the right fit for a headless service account. Trade-off: it bills against the Anthropic Console (per-token), separate from the Claude Max subscription.

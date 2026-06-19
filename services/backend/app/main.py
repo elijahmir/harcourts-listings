@@ -61,39 +61,61 @@ _SUSPICIOUS_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = []
 # a calm, admin-directed message — while logging the REAL error server-side so
 # the operator sees the true cause. See docs/RUNBOOK-auth-recovery.md.
 import re as _re_fatal
+import datetime as _dt_fatal
 
-_FATAL_SIGNATURES = _re_fatal.compile(
-    r"(invalid bearer token"
-    r"|failed to authenticate"
-    r"|api error:\s*401"
-    r"|authentication_error"
-    r"|invalid x-api-key"
-    r"|not logged in"
-    r"|please run\s*/?login"
-    r"|oauth token has expired"
-    r"|credit balance is too low"
-    r"|insufficient[_ ]quota"
-    r"|billing"
-    r"|overloaded_error"
-    r"|api error:\s*529"
-    r"|api error:\s*5\d\d)",
-    _re_fatal.IGNORECASE,
-)
+_APP_CODE = "CP"  # CopyPro / Sales App (PM/Copilot uses "PM")
 
-# What the user sees instead of the raw error. Kept warm + actionable: it tells
-# them it's a temporary system issue needing the admin/tech team, and that
-# nothing they did is lost.
-_FATAL_USER_MESSAGE = (
-    "⚠️ Quick hiccup — CopyPro can't respond right now and needs a fast fix "
-    "from your admin or tech team. Please give them a heads-up. Nothing you've "
-    "entered is lost, and you can pick up right where you left off once it's back."
-)
+# Category → signature. Order matters (first match wins). Each maps to a stable
+# diagnostic code the user copies to admin/tech; the admin table lives in
+# docs/RUNBOOK-auth-recovery.md.
+_FATAL_CATEGORIES: list[tuple[str, "re.Pattern[str]"]] = [
+    ("AUTH", _re_fatal.compile(
+        r"(invalid bearer token|failed to authenticate|api error:\s*401"
+        r"|authentication_error|invalid x-api-key|not logged in"
+        r"|please run\s*/?login|oauth token (has )?expired)", _re_fatal.IGNORECASE)),
+    ("BILL", _re_fatal.compile(
+        r"(credit balance is too low|insufficient[_ ]quota|quota exceeded"
+        r"|billing)", _re_fatal.IGNORECASE)),
+    ("LOAD", _re_fatal.compile(
+        r"(overloaded_error|api error:\s*529|api error:\s*503"
+        r"|service unavailable|api error:\s*5\d\d)", _re_fatal.IGNORECASE)),
+    ("NET", _re_fatal.compile(
+        r"(connection refused|connection reset|timed out|timeout"
+        r"|network is unreachable|name resolution)", _re_fatal.IGNORECASE)),
+]
 
 
-def _detect_fatal(text: str | None) -> bool:
-    """True if `text` looks like a CLI auth/billing/overload failure that
-    should be shown to the user as a friendly notice rather than raw."""
-    return bool(text) and bool(_FATAL_SIGNATURES.search(text))
+def _classify_fatal(text: str | None) -> str | None:
+    """Return the fatal category (AUTH/BILL/LOAD/NET) if `text` matches a known
+    CLI failure signature, else None. None means 'not fatal' — leave the text
+    alone (it may be a real answer)."""
+    if not text:
+        return None
+    for cat, pat in _FATAL_CATEGORIES:
+        if pat.search(text):
+            return cat
+    return None
+
+
+def _fatal_notice(category: str, session_id: str) -> tuple[str, str]:
+    """Build (diagnostic_ref, user_message) for a fatal category.
+
+    The ref — e.g. ``CP-AUTH-01 · session 6f3a2c · 2026-06-19 10:14`` — is what
+    the user copies to admin/tech; the session prefix + time let the admin grep
+    the backend log for the real, full error.
+    """
+    code = f"{_APP_CODE}-{category}-01"
+    sid = (session_id or "")[:6] or "------"
+    ts = _dt_fatal.datetime.now().strftime("%Y-%m-%d %H:%M")
+    ref = f"{code} · session {sid} · {ts}"
+    msg = (
+        "⚠️ CopyPro hit a snag and can't respond right now.\n\n"
+        "Please copy the code below and send it to your admin or tech team — "
+        "it tells them exactly what to check:\n\n"
+        f"```\n{ref}\n```\n\n"
+        "Nothing you've entered is lost. You can continue once it's sorted."
+    )
+    return ref, msg
 
 
 def _compile_suspicious_patterns() -> None:
@@ -1171,18 +1193,20 @@ async def chat_ws(websocket: WebSocket) -> None:
                         # a confirmed auth/billing/overload SIGNATURE (not a
                         # generic is_error / non-zero rc), so we never clobber a
                         # real answer or one the jsonl fallback could recover.
-                        if not fatal_handled and (
-                            _detect_fatal(ev.error_message)
-                            or _detect_fatal(getattr(ev, "stderr_tail", ""))
-                        ):
+                        _summary_cat = None if fatal_handled else (
+                            _classify_fatal(ev.error_message)
+                            or _classify_fatal(getattr(ev, "stderr_tail", ""))
+                        )
+                        if _summary_cat:
+                            ref, msg = _fatal_notice(_summary_cat, session_id)
                             log.warning(
-                                "fatal CLI error at end-of-turn for session=%s: "
+                                "fatal CLI error [%s] at end-of-turn for session=%s: "
                                 "rc=%s msg=%s stderr=%s",
-                                session_id, getattr(ev, "return_code", "?"),
+                                ref, session_id, getattr(ev, "return_code", "?"),
                                 (ev.error_message or "")[:200],
                                 getattr(ev, "stderr_tail", "")[:200],
                             )
-                            current_block_text = _FATAL_USER_MESSAGE
+                            current_block_text = msg
                             fatal_handled = True
 
                         # End-of-turn safety net: if nothing landed in
@@ -1277,19 +1301,23 @@ async def chat_ws(websocket: WebSocket) -> None:
                         # friendly notice and log the real error. Once handled,
                         # ignore further text on this turn so the raw error
                         # can't slip through a later delta.
-                        if not fatal_handled and _detect_fatal(ev.text):
+                        _fatal_cat = (
+                            None if fatal_handled else _classify_fatal(ev.text)
+                        )
+                        if _fatal_cat:
+                            ref, msg = _fatal_notice(_fatal_cat, session_id)
                             log.warning(
-                                "fatal CLI error suppressed for session=%s: %s",
-                                session_id, ev.text.strip()[:300],
+                                "fatal CLI error [%s] suppressed for session=%s: %s",
+                                ref, session_id, ev.text.strip()[:300],
                             )
-                            # Swap the scary text for the friendly notice; it
-                            # flushes as a normal assistant bubble. The end-of-
-                            # turn `done` frame still fires to stop streaming.
-                            current_block_text = _FATAL_USER_MESSAGE
+                            # Swap the scary text for the friendly notice + code;
+                            # it flushes as a normal assistant bubble. The end-
+                            # of-turn `done` frame still fires to stop streaming.
+                            current_block_text = msg
                             fatal_handled = True
                         elif not fatal_handled:
                             current_block_text = ev.text
-                        # if fatal_handled: keep the friendly text, drop the rest
+                        # if fatal_handled: keep the friendly notice, drop the rest
 
                     if ev.kind == "tool_use":
                         # Bubble boundary: commit whatever's currently
